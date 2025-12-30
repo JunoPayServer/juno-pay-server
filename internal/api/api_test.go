@@ -26,7 +26,7 @@ func (t fixedTip) BestTip(_ context.Context) (int64, string, error) { return t.h
 
 type fakeDeriver struct{}
 
-func (fakeDeriver) Derive(_ string, index uint32) (string, error) {
+func (fakeDeriver) Derive(_ string, _ string, index uint32) (string, error) {
 	return "j1addr" + itoa(uint64(index)), nil
 }
 
@@ -95,14 +95,14 @@ func TestCreateInvoice_SuccessAndIdempotent(t *testing.T) {
 		Status string `json:"status"`
 		Data   struct {
 			Invoice struct {
-				InvoiceID        string `json:"invoice_id"`
-				MerchantID       string `json:"merchant_id"`
-				ExternalOrderID  string `json:"external_order_id"`
-				Status           string `json:"status"`
-				Address          string `json:"address"`
-				AmountZat        int64  `json:"amount_zat"`
-				RequiredConfs    int32  `json:"required_confirmations"`
-				ExpiresAt        *string `json:"expires_at"`
+				InvoiceID       string  `json:"invoice_id"`
+				MerchantID      string  `json:"merchant_id"`
+				ExternalOrderID string  `json:"external_order_id"`
+				Status          string  `json:"status"`
+				Address         string  `json:"address"`
+				AmountZat       int64   `json:"amount_zat"`
+				RequiredConfs   int32   `json:"required_confirmations"`
+				ExpiresAt       *string `json:"expires_at"`
 			} `json:"invoice"`
 			InvoiceToken string `json:"invoice_token"`
 		} `json:"data"`

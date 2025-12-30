@@ -9,8 +9,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/Abdullah1738/juno-addrgen/pkg/addrgen"
 	"github.com/Abdullah1738/juno-pay-server/internal/api"
+	"github.com/Abdullah1738/juno-pay-server/internal/keys"
+	"github.com/Abdullah1738/juno-pay-server/internal/keys/ffi"
 	"github.com/Abdullah1738/juno-pay-server/internal/store"
 	"github.com/Abdullah1738/juno-sdk-go/junocashd"
 )
@@ -25,7 +26,7 @@ func main() {
 	rpcPass := getenv("JUNO_CASHD_RPC_PASS", "")
 	jcd := junocashd.New(rpcURL, rpcUser, rpcPass)
 
-	s, err := api.New(st, addrgenDeriver{}, junocashdTip{cli: jcd}, realClock{}, randTokenGen{})
+	s, err := api.New(st, keysDeriver{d: ffi.New()}, junocashdTip{cli: jcd}, realClock{}, randTokenGen{})
 	if err != nil {
 		log.Fatalf("init error: %v", err)
 	}
@@ -49,10 +50,10 @@ func getenv(key, fallback string) string {
 	return fallback
 }
 
-type addrgenDeriver struct{}
+type keysDeriver struct{ d keys.Deriver }
 
-func (addrgenDeriver) Derive(ufvk string, index uint32) (string, error) {
-	return addrgen.Derive(ufvk, index)
+func (kd keysDeriver) Derive(ufvk string, uaHRP string, index uint32) (string, error) {
+	return kd.d.AddressFromUFVK(ufvk, uaHRP, keys.ScopeExternal, index)
 }
 
 type junocashdTip struct{ cli *junocashd.Client }

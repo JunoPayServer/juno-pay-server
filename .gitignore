@@ -6,5 +6,8 @@
 /.cache/
 *.sqlite
 
+# Rust
+/rust/**/target/
+
 # OS
 .DS_Store

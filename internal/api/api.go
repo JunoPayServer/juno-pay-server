@@ -14,7 +14,7 @@ import (
 )
 
 type Deriver interface {
-	Derive(ufvk string, index uint32) (string, error)
+	Derive(ufvk string, uaHRP string, index uint32) (string, error)
 }
 
 type TipSource interface {
@@ -179,7 +179,7 @@ func (s *Server) handleCreateInvoice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	addr, err := s.deriver.Derive(wallet.UFVK, addrIndex)
+	addr, err := s.deriver.Derive(wallet.UFVK, wallet.UAHRP, addrIndex)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", "address derivation failed")
 		return
