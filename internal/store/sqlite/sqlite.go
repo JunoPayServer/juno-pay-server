@@ -173,6 +173,23 @@ func (s *Store) Init(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_refunds_merchant_id ON refunds(merchant_id, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_refunds_invoice_id ON refunds(invoice_id, id)`,
+		`CREATE TABLE IF NOT EXISTS review_cases (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			review_id TEXT NOT NULL UNIQUE,
+			merchant_id TEXT NOT NULL,
+			invoice_id TEXT,
+			reason TEXT NOT NULL,
+			status TEXT NOT NULL,
+			notes TEXT NOT NULL,
+			deposit_wallet_id TEXT,
+			deposit_txid TEXT,
+			deposit_action_index INTEGER,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_review_cases_merchant_status ON review_cases(merchant_id, status, id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_review_cases_invoice_unique ON review_cases(merchant_id, invoice_id, reason, status)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_review_cases_deposit_unique ON review_cases(deposit_wallet_id, deposit_txid, deposit_action_index, reason)`,
 		`CREATE TABLE IF NOT EXISTS invoice_events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			invoice_id TEXT NOT NULL,
@@ -1526,6 +1543,128 @@ func (s *Store) ListRefunds(ctx context.Context, f store.RefundFilter) (refunds 
 	return out, next, nil
 }
 
+func (s *Store) ListReviewCases(ctx context.Context, f store.ReviewCaseFilter) ([]domain.ReviewCase, error) {
+	f.MerchantID = strings.TrimSpace(f.MerchantID)
+	where := []string{"1=1"}
+	args := []any{}
+
+	if f.MerchantID != "" {
+		where = append(where, "merchant_id = ?")
+		args = append(args, f.MerchantID)
+	}
+	if f.Status != "" {
+		where = append(where, "status = ?")
+		args = append(args, string(f.Status))
+	}
+
+	q := `
+		SELECT review_id, merchant_id, invoice_id, reason, status, notes, created_at, updated_at
+		FROM review_cases
+		WHERE ` + strings.Join(where, " AND ") + `
+		ORDER BY id DESC
+	`
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []domain.ReviewCase{}
+	for rows.Next() {
+		var (
+			reviewID   string
+			merchantID string
+			invoiceID  sql.NullString
+			reason     string
+			status     string
+			notes      string
+			createdAt  int64
+			updatedAt  int64
+		)
+		if err := rows.Scan(&reviewID, &merchantID, &invoiceID, &reason, &status, &notes, &createdAt, &updatedAt); err != nil {
+			return nil, err
+		}
+		var invID *string
+		if invoiceID.Valid && strings.TrimSpace(invoiceID.String) != "" {
+			v := invoiceID.String
+			invID = &v
+		}
+		out = append(out, domain.ReviewCase{
+			ReviewID:   reviewID,
+			MerchantID: merchantID,
+			InvoiceID:  invID,
+			Reason:     domain.ReviewReason(reason),
+			Status:     domain.ReviewStatus(status),
+			Notes:      notes,
+			CreatedAt:  time.Unix(createdAt, 0).UTC(),
+			UpdatedAt:  time.Unix(updatedAt, 0).UTC(),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *Store) ResolveReviewCase(ctx context.Context, reviewID string, notes string) error {
+	reviewID = strings.TrimSpace(reviewID)
+	notes = strings.TrimSpace(notes)
+	if reviewID == "" {
+		return domain.NewError(domain.ErrInvalidArgument, "review_id is required")
+	}
+	if notes == "" {
+		return domain.NewError(domain.ErrInvalidArgument, "notes is required")
+	}
+
+	now := time.Now().UTC().Unix()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE review_cases
+		SET status = ?, notes = ?, updated_at = ?
+		WHERE review_id = ?
+	`, string(domain.ReviewResolved), notes, now, reviewID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) RejectReviewCase(ctx context.Context, reviewID string, notes string) error {
+	reviewID = strings.TrimSpace(reviewID)
+	notes = strings.TrimSpace(notes)
+	if reviewID == "" {
+		return domain.NewError(domain.ErrInvalidArgument, "review_id is required")
+	}
+	if notes == "" {
+		return domain.NewError(domain.ErrInvalidArgument, "notes is required")
+	}
+
+	now := time.Now().UTC().Unix()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE review_cases
+		SET status = ?, notes = ?, updated_at = ?
+		WHERE review_id = ?
+	`, string(domain.ReviewRejected), notes, now, reviewID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) CreateEventSink(ctx context.Context, req store.EventSinkCreate) (domain.EventSink, error) {
 	req.MerchantID = strings.TrimSpace(req.MerchantID)
 	if req.MerchantID == "" {
@@ -2379,7 +2518,56 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 	}
 
 	if applyInvoiceID == "" {
-		return nil
+		// Unknown address deposit (unattributed): create a manual review case if we can map wallet_id -> merchant.
+		rows, err := tx.QueryContext(ctx, `
+			SELECT merchant_id
+			FROM merchant_wallets
+			WHERE wallet_id = ?
+		`, walletID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		merchantID := ""
+		for rows.Next() {
+			var mid string
+			if err := rows.Scan(&mid); err != nil {
+				return err
+			}
+			if merchantID != "" && merchantID != mid {
+				return fmt.Errorf("sqlite: wallet_id %q is mapped to multiple merchants", walletID)
+			}
+			merchantID = mid
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if merchantID == "" {
+			return nil
+		}
+
+		reviewID, err := newID("rev")
+		if err != nil {
+			return err
+		}
+		notes := fmt.Sprintf("wallet_id=%s txid=%s action_index=%d recipient_address=%s amount_zat=%d height=%d",
+			walletID, txid, actionIndex, addr, amountZat, height,
+		)
+
+		_, err = tx.ExecContext(ctx, `
+			INSERT OR IGNORE INTO review_cases (
+				review_id, merchant_id, invoice_id,
+				reason, status, notes,
+				deposit_wallet_id, deposit_txid, deposit_action_index,
+				created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, reviewID, merchantID, nil,
+			string(domain.ReviewUnknownAddress), string(domain.ReviewOpen), notes,
+			walletID, txid, actionIndex,
+			updatedAtUnix, updatedAtUnix,
+		)
+		return err
 	}
 
 	depRef := &domain.DepositRef{
@@ -2420,16 +2608,19 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 	}
 
 	var (
+		invMerchantID string
 		invAmount     int64
 		invStatus     string
 		invExpires    sql.NullInt64
 		invLatePolicy string
+		invPartial    string
+		invOverpay    string
 	)
 	if err := tx.QueryRowContext(ctx, `
-		SELECT amount_zat, status, expires_at, policy_late_payment
+		SELECT merchant_id, amount_zat, status, expires_at, policy_late_payment, policy_partial_payment, policy_overpayment
 		FROM invoices
 		WHERE invoice_id = ?
-	`, applyInvoiceID).Scan(&invAmount, &invStatus, &invExpires, &invLatePolicy); err != nil {
+	`, applyInvoiceID).Scan(&invMerchantID, &invAmount, &invStatus, &invExpires, &invLatePolicy, &invPartial, &invOverpay); err != nil {
 		return err
 	}
 
@@ -2460,6 +2651,65 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 			}
 		case domain.InvoiceOverpaid:
 			if err := s.insertInvoiceEventTx(ctx, tx, applyInvoiceID, domain.InvoiceEventInvoiceOverpaid, now, nil, nil); err != nil {
+				return err
+			}
+		}
+
+		invID := applyInvoiceID
+		switch {
+		case newStatus == domain.InvoicePartial && domain.PartialPaymentPolicy(invPartial) == domain.PartialPaymentReject:
+			reviewID, err := newID("rev")
+			if err != nil {
+				return err
+			}
+			_, err = tx.ExecContext(ctx, `
+				INSERT OR IGNORE INTO review_cases (
+					review_id, merchant_id, invoice_id,
+					reason, status, notes,
+					created_at, updated_at
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			`, reviewID, invMerchantID, invID,
+				string(domain.ReviewPartialPayment), string(domain.ReviewOpen), "partial payment requires review",
+				updatedAtUnix, updatedAtUnix,
+			)
+			if err != nil {
+				return err
+			}
+		case newStatus == domain.InvoiceOverpaid && domain.OverpaymentPolicy(invOverpay) == domain.OverpaymentManualReview:
+			reviewID, err := newID("rev")
+			if err != nil {
+				return err
+			}
+			_, err = tx.ExecContext(ctx, `
+				INSERT OR IGNORE INTO review_cases (
+					review_id, merchant_id, invoice_id,
+					reason, status, notes,
+					created_at, updated_at
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			`, reviewID, invMerchantID, invID,
+				string(domain.ReviewOverpayment), string(domain.ReviewOpen), "overpayment requires review",
+				updatedAtUnix, updatedAtUnix,
+			)
+			if err != nil {
+				return err
+			}
+		case (newStatus == domain.InvoicePaid || newStatus == domain.InvoicePaidLate) &&
+			expired && confirmedSum == invAmount && domain.LatePaymentPolicy(invLatePolicy) == domain.LatePaymentManualReview:
+			reviewID, err := newID("rev")
+			if err != nil {
+				return err
+			}
+			_, err = tx.ExecContext(ctx, `
+				INSERT OR IGNORE INTO review_cases (
+					review_id, merchant_id, invoice_id,
+					reason, status, notes,
+					created_at, updated_at
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			`, reviewID, invMerchantID, invID,
+				string(domain.ReviewLatePayment), string(domain.ReviewOpen), "late payment requires review",
+				updatedAtUnix, updatedAtUnix,
+			)
+			if err != nil {
 				return err
 			}
 		}

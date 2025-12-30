@@ -24,6 +24,7 @@ type MemStore struct {
 	invoiceSeq  int64
 	depositSeq  int64
 	refundSeq   int64
+	reviewSeq   int64
 	sinkSeq     int64
 	outboxSeq   int64
 	deliverySeq int64
@@ -49,6 +50,9 @@ type MemStore struct {
 	invoiceEvents   map[string][]domain.InvoiceEvent // invoice_id -> events
 
 	refunds []refundRecord // ordered by seq
+
+	reviewCases map[string]reviewRecord // review_id -> record
+	reviewOrder []string                // insertion order
 
 	eventSinks map[string]domain.EventSink     // sink_id -> sink
 	outbox     []outboxEventRecord             // ordered by seq
@@ -90,6 +94,14 @@ type refundRecord struct {
 	Refund domain.Refund
 }
 
+type reviewRecord struct {
+	Case domain.ReviewCase
+
+	DepositWalletID    string
+	DepositTxID        string
+	DepositActionIndex int32
+}
+
 func NewMem() *MemStore {
 	return &MemStore{
 		merchants:         make(map[string]domain.Merchant),
@@ -104,6 +116,7 @@ func NewMem() *MemStore {
 		scanCursor:        make(map[string]int64),
 		deposits:          make(map[string]depositRecord),
 		invoiceEvents:     make(map[string][]domain.InvoiceEvent),
+		reviewCases:       make(map[string]reviewRecord),
 		eventSinks:        make(map[string]domain.EventSink),
 		deliveries:        make(map[string]domain.EventDelivery),
 	}
@@ -806,6 +819,124 @@ func (s *MemStore) ListRefunds(_ context.Context, f RefundFilter) ([]domain.Refu
 	return out, nextCursor, nil
 }
 
+func (s *MemStore) ListReviewCases(_ context.Context, f ReviewCaseFilter) ([]domain.ReviewCase, error) {
+	f.MerchantID = strings.TrimSpace(f.MerchantID)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]domain.ReviewCase, 0, len(s.reviewCases))
+	for _, id := range s.reviewOrder {
+		r, ok := s.reviewCases[id]
+		if !ok {
+			continue
+		}
+		c := r.Case
+		if f.MerchantID != "" && c.MerchantID != f.MerchantID {
+			continue
+		}
+		if f.Status != "" && c.Status != f.Status {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+func (s *MemStore) ResolveReviewCase(_ context.Context, reviewID string, notes string) error {
+	reviewID = strings.TrimSpace(reviewID)
+	notes = strings.TrimSpace(notes)
+	if reviewID == "" {
+		return domain.NewError(domain.ErrInvalidArgument, "review_id is required")
+	}
+	if notes == "" {
+		return domain.NewError(domain.ErrInvalidArgument, "notes is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	r, ok := s.reviewCases[reviewID]
+	if !ok {
+		return ErrNotFound
+	}
+
+	now := time.Now().UTC()
+	r.Case.Status = domain.ReviewResolved
+	r.Case.Notes = notes
+	r.Case.UpdatedAt = now
+	s.reviewCases[reviewID] = r
+	return nil
+}
+
+func (s *MemStore) RejectReviewCase(_ context.Context, reviewID string, notes string) error {
+	reviewID = strings.TrimSpace(reviewID)
+	notes = strings.TrimSpace(notes)
+	if reviewID == "" {
+		return domain.NewError(domain.ErrInvalidArgument, "review_id is required")
+	}
+	if notes == "" {
+		return domain.NewError(domain.ErrInvalidArgument, "notes is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	r, ok := s.reviewCases[reviewID]
+	if !ok {
+		return ErrNotFound
+	}
+
+	now := time.Now().UTC()
+	r.Case.Status = domain.ReviewRejected
+	r.Case.Notes = notes
+	r.Case.UpdatedAt = now
+	s.reviewCases[reviewID] = r
+	return nil
+}
+
+func (s *MemStore) createReviewCaseLocked(merchantID string, invoiceID *string, reason domain.ReviewReason, notes string, depWalletID, depTxID string, depActionIndex int32) {
+	merchantID = strings.TrimSpace(merchantID)
+	if merchantID == "" {
+		return
+	}
+
+	for _, r := range s.reviewCases {
+		if r.Case.Status != domain.ReviewOpen || r.Case.MerchantID != merchantID || r.Case.Reason != reason {
+			continue
+		}
+		if invoiceID != nil && r.Case.InvoiceID != nil && *r.Case.InvoiceID == *invoiceID {
+			return
+		}
+		if invoiceID == nil && depWalletID != "" && depTxID != "" {
+			if r.DepositWalletID == depWalletID && r.DepositTxID == depTxID && r.DepositActionIndex == depActionIndex {
+				return
+			}
+		}
+	}
+
+	s.reviewSeq++
+	now := time.Now().UTC()
+	id := fmt.Sprintf("rev_%016x", s.reviewSeq)
+	c := domain.ReviewCase{
+		ReviewID:   id,
+		MerchantID: merchantID,
+		InvoiceID:  invoiceID,
+		Reason:     reason,
+		Status:     domain.ReviewOpen,
+		Notes:      strings.TrimSpace(notes),
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	s.reviewCases[id] = reviewRecord{
+		Case:               c,
+		DepositWalletID:    depWalletID,
+		DepositTxID:        depTxID,
+		DepositActionIndex: depActionIndex,
+	}
+	s.reviewOrder = append(s.reviewOrder, id)
+}
+
 func (s *MemStore) applyDepositLocked(ev ScanEvent, walletID, txid string, actionIndex int32, recipientAddress string, amountZatoshis uint64, height int64, status string, confirmedHeight *int64) {
 	if walletID == "" {
 		walletID = ev.WalletID
@@ -864,6 +995,20 @@ func (s *MemStore) applyDepositLocked(ev ScanEvent, walletID, txid string, actio
 	s.deposits[depKey] = rec
 
 	if rec.InvoiceID == "" {
+		// Unknown address deposit (unattributed).
+		merchantID := ""
+		for _, w := range s.merchantWallet {
+			if w.WalletID == walletID {
+				merchantID = w.MerchantID
+				break
+			}
+		}
+		if merchantID != "" {
+			notes := fmt.Sprintf("wallet_id=%s txid=%s action_index=%d recipient_address=%s amount_zat=%d height=%d",
+				walletID, txid, actionIndex, addr, amountZat, height,
+			)
+			s.createReviewCaseLocked(merchantID, nil, domain.ReviewUnknownAddress, notes, walletID, txid, actionIndex)
+		}
 		return
 	}
 
@@ -921,6 +1066,19 @@ func (s *MemStore) recomputeInvoiceLocked(invoiceID string) {
 			s.appendInvoiceEventLocked(invoiceID, domain.InvoiceEventInvoicePaid, now, nil, nil)
 		case domain.InvoiceOverpaid:
 			s.appendInvoiceEventLocked(invoiceID, domain.InvoiceEventInvoiceOverpaid, now, nil, nil)
+		}
+
+		invID := invoiceID
+		switch {
+		case inv.Status == domain.InvoicePartial && inv.Policies.PartialPayment == domain.PartialPaymentReject:
+			s.createReviewCaseLocked(inv.MerchantID, &invID, domain.ReviewPartialPayment, "partial payment requires review", "", "", 0)
+		case inv.Status == domain.InvoiceOverpaid && inv.Policies.Overpayment == domain.OverpaymentManualReview:
+			s.createReviewCaseLocked(inv.MerchantID, &invID, domain.ReviewOverpayment, "overpayment requires review", "", "", 0)
+		case inv.Status == domain.InvoicePaid || inv.Status == domain.InvoicePaidLate:
+			expired := inv.ExpiresAt != nil && now.After(inv.ExpiresAt.UTC())
+			if expired && inv.ReceivedConfirmedZat == inv.AmountZat && inv.Policies.LatePayment == domain.LatePaymentManualReview {
+				s.createReviewCaseLocked(inv.MerchantID, &invID, domain.ReviewLatePayment, "late payment requires review", "", "", 0)
+			}
 		}
 	}
 }

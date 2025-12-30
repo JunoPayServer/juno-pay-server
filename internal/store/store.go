@@ -81,6 +81,11 @@ type RefundFilter struct {
 	Limit   int
 }
 
+type ReviewCaseFilter struct {
+	MerchantID string
+	Status     domain.ReviewStatus
+}
+
 type ScanEvent struct {
 	WalletID   string
 	Cursor     int64
@@ -150,6 +155,11 @@ type Store interface {
 	// Refunds (manual recordkeeping; no signing/broadcast).
 	CreateRefund(ctx context.Context, req RefundCreate) (domain.Refund, error)
 	ListRefunds(ctx context.Context, f RefundFilter) (refunds []domain.Refund, nextCursor int64, err error)
+
+	// Review cases (manual review queue).
+	ListReviewCases(ctx context.Context, f ReviewCaseFilter) ([]domain.ReviewCase, error)
+	ResolveReviewCase(ctx context.Context, reviewID string, notes string) error
+	RejectReviewCase(ctx context.Context, reviewID string, notes string) error
 
 	// Outbound events (webhook/brokers) + sinks.
 	CreateEventSink(ctx context.Context, req EventSinkCreate) (domain.EventSink, error)

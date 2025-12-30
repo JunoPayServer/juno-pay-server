@@ -659,3 +659,277 @@ func TestStore_OutboxFromInvoiceEvents(t *testing.T) {
 		t.Fatalf("expected pending, got %q", ds[0].Status)
 	}
 }
+
+func TestStore_ReviewCases_UnknownAddressDeposit(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	m, err := s.CreateMerchant(ctx, "acme", domain.MerchantSettings{
+		InvoiceTTLSeconds:     0,
+		RequiredConfirmations: 0,
+		Policies: domain.InvoicePolicies{
+			LatePayment:    domain.LatePaymentMarkPaidLate,
+			PartialPayment: domain.PartialPaymentAccept,
+			Overpayment:    domain.OverpaymentMarkOverpaid,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateMerchant: %v", err)
+	}
+	if _, err := s.SetMerchantWallet(ctx, m.MerchantID, store.MerchantWallet{
+		WalletID: "w1",
+		UFVK:     "jview1test",
+		Chain:    "mainnet",
+		UAHRP:    "j",
+		CoinType: 8133,
+	}); err != nil {
+		t.Fatalf("SetMerchantWallet: %v", err)
+	}
+
+	p1 := types.DepositEventPayload{
+		DepositEvent: types.DepositEvent{
+			WalletID:       "w1",
+			TxID:           "tx1",
+			Height:         1,
+			ActionIndex:    0,
+			AmountZatoshis: 123,
+		},
+		RecipientAddress: "j1unknown",
+	}
+	b1, _ := json.Marshal(p1)
+	if err := s.ApplyScanEvent(ctx, store.ScanEvent{
+		WalletID:   "w1",
+		Cursor:     1,
+		Kind:       string(types.WalletEventKindDepositEvent),
+		Payload:    b1,
+		OccurredAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("ApplyScanEvent deposit: %v", err)
+	}
+
+	p2 := types.DepositConfirmedPayload{
+		DepositEventPayload: types.DepositEventPayload{
+			DepositEvent: types.DepositEvent{
+				WalletID:       "w1",
+				TxID:           "tx1",
+				Height:         1,
+				ActionIndex:    0,
+				AmountZatoshis: 123,
+			},
+			RecipientAddress: "j1unknown",
+		},
+		ConfirmedHeight:       1,
+		RequiredConfirmations: 0,
+	}
+	b2, _ := json.Marshal(p2)
+	if err := s.ApplyScanEvent(ctx, store.ScanEvent{
+		WalletID:   "w1",
+		Cursor:     2,
+		Kind:       string(types.WalletEventKindDepositConfirmed),
+		Payload:    b2,
+		OccurredAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("ApplyScanEvent confirmed: %v", err)
+	}
+
+	cs, err := s.ListReviewCases(ctx, store.ReviewCaseFilter{MerchantID: m.MerchantID, Status: domain.ReviewOpen})
+	if err != nil {
+		t.Fatalf("ListReviewCases: %v", err)
+	}
+	if len(cs) != 1 {
+		t.Fatalf("expected 1 review case, got %d", len(cs))
+	}
+	if cs[0].Reason != domain.ReviewUnknownAddress {
+		t.Fatalf("expected reason unknown_address, got %q", cs[0].Reason)
+	}
+	if cs[0].InvoiceID != nil {
+		t.Fatalf("expected invoice_id nil")
+	}
+}
+
+func TestStore_ReviewCases_FromInvoicePolicies(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	m, err := s.CreateMerchant(ctx, "acme", domain.MerchantSettings{
+		InvoiceTTLSeconds:     0,
+		RequiredConfirmations: 0,
+		Policies: domain.InvoicePolicies{
+			LatePayment:    domain.LatePaymentManualReview,
+			PartialPayment: domain.PartialPaymentReject,
+			Overpayment:    domain.OverpaymentManualReview,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateMerchant: %v", err)
+	}
+	if _, err := s.SetMerchantWallet(ctx, m.MerchantID, store.MerchantWallet{
+		WalletID: "w1",
+		UFVK:     "jview1test",
+		Chain:    "mainnet",
+		UAHRP:    "j",
+		CoinType: 8133,
+	}); err != nil {
+		t.Fatalf("SetMerchantWallet: %v", err)
+	}
+
+	expired := time.Now().UTC().Add(-1 * time.Second)
+	invPartial, _, err := s.CreateInvoice(ctx, store.InvoiceCreate{
+		MerchantID:            m.MerchantID,
+		ExternalOrderID:       "order-partial",
+		WalletID:              "w1",
+		AddressIndex:          0,
+		Address:               "j1partial",
+		CreatedAfterHeight:    0,
+		CreatedAfterHash:      "h0",
+		AmountZat:             10,
+		RequiredConfirmations: 0,
+		Policies: domain.InvoicePolicies{
+			LatePayment:    domain.LatePaymentManualReview,
+			PartialPayment: domain.PartialPaymentReject,
+			Overpayment:    domain.OverpaymentManualReview,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateInvoice partial: %v", err)
+	}
+	invOverpaid, _, err := s.CreateInvoice(ctx, store.InvoiceCreate{
+		MerchantID:            m.MerchantID,
+		ExternalOrderID:       "order-overpaid",
+		WalletID:              "w1",
+		AddressIndex:          1,
+		Address:               "j1overpaid",
+		CreatedAfterHeight:    0,
+		CreatedAfterHash:      "h0",
+		AmountZat:             10,
+		RequiredConfirmations: 0,
+		Policies: domain.InvoicePolicies{
+			LatePayment:    domain.LatePaymentManualReview,
+			PartialPayment: domain.PartialPaymentAccept,
+			Overpayment:    domain.OverpaymentManualReview,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateInvoice overpaid: %v", err)
+	}
+	invLate, _, err := s.CreateInvoice(ctx, store.InvoiceCreate{
+		MerchantID:            m.MerchantID,
+		ExternalOrderID:       "order-late",
+		WalletID:              "w1",
+		AddressIndex:          2,
+		Address:               "j1late",
+		CreatedAfterHeight:    0,
+		CreatedAfterHash:      "h0",
+		AmountZat:             10,
+		RequiredConfirmations: 0,
+		Policies: domain.InvoicePolicies{
+			LatePayment:    domain.LatePaymentManualReview,
+			PartialPayment: domain.PartialPaymentAccept,
+			Overpayment:    domain.OverpaymentMarkOverpaid,
+		},
+		ExpiresAt: &expired,
+	})
+	if err != nil {
+		t.Fatalf("CreateInvoice late: %v", err)
+	}
+
+	pp := types.DepositConfirmedPayload{
+		DepositEventPayload: types.DepositEventPayload{
+			DepositEvent: types.DepositEvent{
+				WalletID:       "w1",
+				TxID:           "tx_partial",
+				Height:         1,
+				ActionIndex:    0,
+				AmountZatoshis: 5,
+			},
+			RecipientAddress: "j1partial",
+		},
+		ConfirmedHeight:       1,
+		RequiredConfirmations: 0,
+	}
+	bpp, _ := json.Marshal(pp)
+	if err := s.ApplyScanEvent(ctx, store.ScanEvent{
+		WalletID:   "w1",
+		Cursor:     1,
+		Kind:       string(types.WalletEventKindDepositConfirmed),
+		Payload:    bpp,
+		OccurredAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("ApplyScanEvent partial: %v", err)
+	}
+
+	op := types.DepositConfirmedPayload{
+		DepositEventPayload: types.DepositEventPayload{
+			DepositEvent: types.DepositEvent{
+				WalletID:       "w1",
+				TxID:           "tx_overpaid",
+				Height:         1,
+				ActionIndex:    0,
+				AmountZatoshis: 11,
+			},
+			RecipientAddress: "j1overpaid",
+		},
+		ConfirmedHeight:       1,
+		RequiredConfirmations: 0,
+	}
+	bop, _ := json.Marshal(op)
+	if err := s.ApplyScanEvent(ctx, store.ScanEvent{
+		WalletID:   "w1",
+		Cursor:     2,
+		Kind:       string(types.WalletEventKindDepositConfirmed),
+		Payload:    bop,
+		OccurredAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("ApplyScanEvent overpaid: %v", err)
+	}
+
+	lp := types.DepositConfirmedPayload{
+		DepositEventPayload: types.DepositEventPayload{
+			DepositEvent: types.DepositEvent{
+				WalletID:       "w1",
+				TxID:           "tx_late",
+				Height:         1,
+				ActionIndex:    0,
+				AmountZatoshis: 10,
+			},
+			RecipientAddress: "j1late",
+		},
+		ConfirmedHeight:       1,
+		RequiredConfirmations: 0,
+	}
+	blp, _ := json.Marshal(lp)
+	if err := s.ApplyScanEvent(ctx, store.ScanEvent{
+		WalletID:   "w1",
+		Cursor:     3,
+		Kind:       string(types.WalletEventKindDepositConfirmed),
+		Payload:    blp,
+		OccurredAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("ApplyScanEvent late: %v", err)
+	}
+
+	cs, err := s.ListReviewCases(ctx, store.ReviewCaseFilter{MerchantID: m.MerchantID, Status: domain.ReviewOpen})
+	if err != nil {
+		t.Fatalf("ListReviewCases: %v", err)
+	}
+	if len(cs) != 3 {
+		t.Fatalf("expected 3 review cases, got %d", len(cs))
+	}
+
+	byInv := map[string]domain.ReviewReason{}
+	for _, c := range cs {
+		if c.InvoiceID == nil {
+			t.Fatalf("expected invoice_id for policy review cases")
+		}
+		byInv[*c.InvoiceID] = c.Reason
+	}
+	if byInv[invPartial.InvoiceID] != domain.ReviewPartialPayment {
+		t.Fatalf("expected partial invoice to have partial_payment review case")
+	}
+	if byInv[invOverpaid.InvoiceID] != domain.ReviewOverpayment {
+		t.Fatalf("expected overpaid invoice to have overpayment review case")
+	}
+	if byInv[invLate.InvoiceID] != domain.ReviewLatePayment {
+		t.Fatalf("expected late invoice to have late_payment review case")
+	}
+}
