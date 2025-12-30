@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -223,5 +224,95 @@ func TestStore_InvoiceIdempotencyAndTokenRoundTrip(t *testing.T) {
 	})
 	if !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("expected conflict, got %v", err)
+	}
+}
+
+func TestStore_OutboxFromInvoiceEvents(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	m, err := s.CreateMerchant(ctx, "acme", domain.MerchantSettings{
+		InvoiceTTLSeconds:     600,
+		RequiredConfirmations: 10,
+		Policies: domain.InvoicePolicies{
+			LatePayment:    domain.LatePaymentMarkPaidLate,
+			PartialPayment: domain.PartialPaymentAccept,
+			Overpayment:    domain.OverpaymentMarkOverpaid,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateMerchant: %v", err)
+	}
+	if _, err := s.SetMerchantWallet(ctx, m.MerchantID, store.MerchantWallet{
+		WalletID: "w1",
+		UFVK:     "jview1js32zyfmmd4yzqy04pf9qwqrj47w3uvekjzs7pzfh2ars2v0ggzg74cd39lw9px0tr0nq7e86xevgx7fqxzslmlfqcaw28wj75prfgd0xdae7fywxl99n035kejzpj9upard7kegh3epjna7efmzy392cyr7a2hs4khc00zq0j2jqnnnz0usmuc92r5un",
+		Chain:    "mainnet",
+		UAHRP:    "j",
+		CoinType: 8133,
+	}); err != nil {
+		t.Fatalf("SetMerchantWallet: %v", err)
+	}
+
+	sink, err := s.CreateEventSink(ctx, store.EventSinkCreate{
+		MerchantID: m.MerchantID,
+		Kind:       domain.EventSinkWebhook,
+		Config:     json.RawMessage(`{"url":"https://example.com/webhook","secret":"s"}`),
+	})
+	if err != nil {
+		t.Fatalf("CreateEventSink: %v", err)
+	}
+	if sink.MerchantID != m.MerchantID || sink.SinkID == "" {
+		t.Fatalf("unexpected sink: %+v", sink)
+	}
+
+	_, created, err := s.CreateInvoice(ctx, store.InvoiceCreate{
+		MerchantID:            m.MerchantID,
+		ExternalOrderID:       "order-1",
+		WalletID:              "w1",
+		AddressIndex:          0,
+		Address:               "j1addr0",
+		CreatedAfterHeight:    100,
+		CreatedAfterHash:      "h100",
+		AmountZat:             123,
+		RequiredConfirmations: 10,
+		Policies: domain.InvoicePolicies{
+			LatePayment:    domain.LatePaymentMarkPaidLate,
+			PartialPayment: domain.PartialPaymentAccept,
+			Overpayment:    domain.OverpaymentMarkOverpaid,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateInvoice: %v", err)
+	}
+	if !created {
+		t.Fatalf("expected created true")
+	}
+
+	evs, _, err := s.ListOutboundEvents(ctx, m.MerchantID, 0, 100)
+	if err != nil {
+		t.Fatalf("ListOutboundEvents: %v", err)
+	}
+	if len(evs) == 0 {
+		t.Fatalf("expected at least 1 outbound event")
+	}
+	if evs[0].Type != "invoice.created" {
+		t.Fatalf("expected type invoice.created, got %q", evs[0].Type)
+	}
+
+	ds, err := s.ListEventDeliveries(ctx, store.EventDeliveryFilter{
+		MerchantID: m.MerchantID,
+		Limit:      100,
+	})
+	if err != nil {
+		t.Fatalf("ListEventDeliveries: %v", err)
+	}
+	if len(ds) == 0 {
+		t.Fatalf("expected at least 1 delivery")
+	}
+	if ds[0].SinkID != sink.SinkID {
+		t.Fatalf("expected delivery sink_id=%q, got %q", sink.SinkID, ds[0].SinkID)
+	}
+	if ds[0].Status != domain.EventDeliveryPending {
+		t.Fatalf("expected pending, got %q", ds[0].Status)
 	}
 }

@@ -21,6 +21,9 @@ type MemStore struct {
 
 	merchantSeq int64
 	invoiceSeq  int64
+	sinkSeq     int64
+	outboxSeq   int64
+	deliverySeq int64
 
 	merchants        map[string]domain.Merchant
 	merchantWallet   map[string]MerchantWallet
@@ -41,6 +44,10 @@ type MemStore struct {
 
 	invoiceEventSeq int64
 	invoiceEvents   map[string][]domain.InvoiceEvent // invoice_id -> events
+
+	eventSinks  map[string]domain.EventSink         // sink_id -> sink
+	outbox      []outboxEventRecord                 // ordered by seq
+	deliveries  map[string]domain.EventDelivery     // delivery_id -> delivery
 }
 
 type apiKeyRecord struct {
@@ -64,6 +71,13 @@ type depositRecord struct {
 	UpdatedAt        time.Time
 }
 
+type outboxEventRecord struct {
+	Seq        int64
+	MerchantID string
+	Event      domain.CloudEvent
+	CreatedAt  time.Time
+}
+
 func NewMem() *MemStore {
 	return &MemStore{
 		merchants:         make(map[string]domain.Merchant),
@@ -78,6 +92,8 @@ func NewMem() *MemStore {
 		scanCursor:        make(map[string]int64),
 		deposits:          make(map[string]depositRecord),
 		invoiceEvents:     make(map[string][]domain.InvoiceEvent),
+		eventSinks:        make(map[string]domain.EventSink),
+		deliveries:        make(map[string]domain.EventDelivery),
 	}
 }
 
@@ -682,4 +698,199 @@ func (s *MemStore) appendInvoiceEventLocked(invoiceID string, typ domain.Invoice
 		InvoiceID:  invoiceID,
 		Deposit:    dep,
 	})
+
+	s.enqueueOutboxLocked(invoiceID, typ, occurredAt, dep)
+}
+
+func (s *MemStore) enqueueOutboxLocked(invoiceID string, typ domain.InvoiceEventType, occurredAt time.Time, dep *domain.DepositRef) {
+	inv, ok := s.invoices[invoiceID]
+	if !ok {
+		return
+	}
+
+	data := map[string]any{
+		"merchant_id": inv.MerchantID,
+		"invoice_id":  invoiceID,
+	}
+	if dep != nil {
+		data["deposit"] = map[string]any{
+			"wallet_id":    dep.WalletID,
+			"txid":         dep.TxID,
+			"action_index": dep.ActionIndex,
+			"amount_zat":   dep.AmountZat,
+			"height":       dep.Height,
+		}
+	}
+	dataBytes, err := json.Marshal(data)
+	if err != nil {
+		return
+	}
+
+	s.outboxSeq++
+	eventID := fmt.Sprintf("evt_%016x", s.outboxSeq)
+	ce := domain.CloudEvent{
+		SpecVersion:     "1.0",
+		ID:              eventID,
+		Source:          "juno-pay-server",
+		Type:            string(typ),
+		Subject:         "invoice/" + invoiceID,
+		Time:            occurredAt.UTC(),
+		DataContentType: "application/json",
+		Data:            dataBytes,
+	}
+	s.outbox = append(s.outbox, outboxEventRecord{
+		Seq:        s.outboxSeq,
+		MerchantID: inv.MerchantID,
+		Event:      ce,
+		CreatedAt:  time.Now().UTC(),
+	})
+
+	for _, sink := range s.eventSinks {
+		if sink.MerchantID != inv.MerchantID || sink.Status != domain.EventSinkActive {
+			continue
+		}
+		s.deliverySeq++
+		deliveryID := fmt.Sprintf("del_%016x", s.deliverySeq)
+		now := time.Now().UTC()
+		s.deliveries[deliveryID] = domain.EventDelivery{
+			DeliveryID: deliveryID,
+			SinkID:     sink.SinkID,
+			EventID:    eventID,
+			Status:     domain.EventDeliveryPending,
+			Attempt:    0,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+	}
+}
+
+func (s *MemStore) CreateEventSink(_ context.Context, req EventSinkCreate) (domain.EventSink, error) {
+	req.MerchantID = strings.TrimSpace(req.MerchantID)
+	if req.MerchantID == "" {
+		return domain.EventSink{}, domain.NewError(domain.ErrInvalidArgument, "merchant_id is required")
+	}
+	if len(req.Config) == 0 {
+		return domain.EventSink{}, domain.NewError(domain.ErrInvalidArgument, "config is required")
+	}
+
+	switch req.Kind {
+	case domain.EventSinkWebhook, domain.EventSinkKafka, domain.EventSinkNATS, domain.EventSinkRabbitMQ:
+	default:
+		return domain.EventSink{}, domain.NewError(domain.ErrInvalidArgument, "kind invalid")
+	}
+
+	var cfgAny any
+	if err := json.Unmarshal(req.Config, &cfgAny); err != nil {
+		return domain.EventSink{}, domain.NewError(domain.ErrInvalidArgument, "config invalid json")
+	}
+	if _, ok := cfgAny.(map[string]any); !ok {
+		return domain.EventSink{}, domain.NewError(domain.ErrInvalidArgument, "config must be an object")
+	}
+	cfgBytes, _ := json.Marshal(cfgAny)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.merchants[req.MerchantID]; !ok {
+		return domain.EventSink{}, ErrNotFound
+	}
+
+	s.sinkSeq++
+	now := time.Now().UTC()
+	sinkID := fmt.Sprintf("sink_%016x", s.sinkSeq)
+	sink := domain.EventSink{
+		SinkID:     sinkID,
+		MerchantID: req.MerchantID,
+		Kind:       req.Kind,
+		Status:     domain.EventSinkActive,
+		Config:     cfgBytes,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	s.eventSinks[sinkID] = sink
+	return sink, nil
+}
+
+func (s *MemStore) GetEventSink(_ context.Context, sinkID string) (domain.EventSink, bool, error) {
+	sinkID = strings.TrimSpace(sinkID)
+	if sinkID == "" {
+		return domain.EventSink{}, false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sink, ok := s.eventSinks[sinkID]
+	return sink, ok, nil
+}
+
+func (s *MemStore) ListEventSinks(_ context.Context, merchantID string) ([]domain.EventSink, error) {
+	merchantID = strings.TrimSpace(merchantID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]domain.EventSink, 0, len(s.eventSinks))
+	for _, s0 := range s.eventSinks {
+		if merchantID != "" && s0.MerchantID != merchantID {
+			continue
+		}
+		out = append(out, s0)
+	}
+	return out, nil
+}
+
+func (s *MemStore) ListOutboundEvents(_ context.Context, merchantID string, afterID int64, limit int) ([]domain.CloudEvent, int64, error) {
+	merchantID = strings.TrimSpace(merchantID)
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]domain.CloudEvent, 0, limit)
+	var next int64
+	for _, r := range s.outbox {
+		if r.Seq <= afterID {
+			continue
+		}
+		if merchantID != "" && r.MerchantID != merchantID {
+			continue
+		}
+		out = append(out, r.Event)
+		next = r.Seq
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, next, nil
+}
+
+func (s *MemStore) ListEventDeliveries(_ context.Context, f EventDeliveryFilter) ([]domain.EventDelivery, error) {
+	f.MerchantID = strings.TrimSpace(f.MerchantID)
+	f.SinkID = strings.TrimSpace(f.SinkID)
+	if f.Limit <= 0 || f.Limit > 1000 {
+		f.Limit = 100
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]domain.EventDelivery, 0, f.Limit)
+	for _, d := range s.deliveries {
+		if f.SinkID != "" && d.SinkID != f.SinkID {
+			continue
+		}
+		if f.Status != "" && d.Status != f.Status {
+			continue
+		}
+		if f.MerchantID != "" {
+			sink, ok := s.eventSinks[d.SinkID]
+			if !ok || sink.MerchantID != f.MerchantID {
+				continue
+			}
+		}
+		out = append(out, d)
+		if len(out) >= f.Limit {
+			break
+		}
+	}
+	return out, nil
 }

@@ -172,6 +172,39 @@ func (s *Store) Init(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_invoice_events_invoice_id ON invoice_events(invoice_id, id)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_invoice_events_deposit_unique
 		 ON invoice_events(invoice_id, type, deposit_wallet_id, deposit_txid, deposit_action_index)`,
+		`CREATE TABLE IF NOT EXISTS event_sinks (
+			sink_id TEXT PRIMARY KEY,
+			merchant_id TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			status TEXT NOT NULL,
+			config_json BLOB NOT NULL,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_sinks_merchant_id ON event_sinks(merchant_id)`,
+		`CREATE TABLE IF NOT EXISTS outbox_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			event_id TEXT NOT NULL UNIQUE,
+			merchant_id TEXT NOT NULL,
+			envelope_json BLOB NOT NULL,
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_outbox_events_merchant_id ON outbox_events(merchant_id, id)`,
+		`CREATE TABLE IF NOT EXISTS event_deliveries (
+			delivery_id TEXT PRIMARY KEY,
+			merchant_id TEXT NOT NULL,
+			sink_id TEXT NOT NULL,
+			event_id TEXT NOT NULL,
+			status TEXT NOT NULL,
+			attempt INTEGER NOT NULL,
+			next_retry_at INTEGER,
+			last_error TEXT,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			UNIQUE(sink_id, event_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_deliveries_merchant_status_retry ON event_deliveries(merchant_id, status, next_retry_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_deliveries_sink_id ON event_deliveries(sink_id)`,
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -970,6 +1003,293 @@ func (s *Store) ListInvoiceEvents(ctx context.Context, invoiceID string, afterID
 	return events, nextCursor, nil
 }
 
+func (s *Store) CreateEventSink(ctx context.Context, req store.EventSinkCreate) (domain.EventSink, error) {
+	req.MerchantID = strings.TrimSpace(req.MerchantID)
+	if req.MerchantID == "" {
+		return domain.EventSink{}, domain.NewError(domain.ErrInvalidArgument, "merchant_id is required")
+	}
+	if len(req.Config) == 0 {
+		return domain.EventSink{}, domain.NewError(domain.ErrInvalidArgument, "config is required")
+	}
+
+	switch req.Kind {
+	case domain.EventSinkWebhook, domain.EventSinkKafka, domain.EventSinkNATS, domain.EventSinkRabbitMQ:
+	default:
+		return domain.EventSink{}, domain.NewError(domain.ErrInvalidArgument, "kind invalid")
+	}
+
+	var cfgAny any
+	if err := json.Unmarshal(req.Config, &cfgAny); err != nil {
+		return domain.EventSink{}, domain.NewError(domain.ErrInvalidArgument, "config invalid json")
+	}
+	if _, ok := cfgAny.(map[string]any); !ok {
+		return domain.EventSink{}, domain.NewError(domain.ErrInvalidArgument, "config must be an object")
+	}
+	cfgBytes, err := json.Marshal(cfgAny)
+	if err != nil {
+		return domain.EventSink{}, err
+	}
+
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM merchants WHERE merchant_id = ?`, req.MerchantID).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.EventSink{}, store.ErrNotFound
+		}
+		return domain.EventSink{}, err
+	}
+
+	sinkID, err := newID("sink")
+	if err != nil {
+		return domain.EventSink{}, err
+	}
+
+	now := time.Now().UTC()
+	nowUnix := now.Unix()
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO event_sinks (sink_id, merchant_id, kind, status, config_json, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, sinkID, req.MerchantID, string(req.Kind), string(domain.EventSinkActive), cfgBytes, nowUnix, nowUnix)
+	if err != nil {
+		return domain.EventSink{}, err
+	}
+
+	return domain.EventSink{
+		SinkID:     sinkID,
+		MerchantID: req.MerchantID,
+		Kind:       req.Kind,
+		Status:     domain.EventSinkActive,
+		Config:     cfgBytes,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}, nil
+}
+
+func (s *Store) GetEventSink(ctx context.Context, sinkID string) (domain.EventSink, bool, error) {
+	sinkID = strings.TrimSpace(sinkID)
+	if sinkID == "" {
+		return domain.EventSink{}, false, nil
+	}
+
+	var (
+		merchantID  string
+		kind        string
+		status      string
+		configBytes []byte
+		createdUnix int64
+		updatedUnix int64
+	)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT merchant_id, kind, status, config_json, created_at, updated_at
+		FROM event_sinks
+		WHERE sink_id = ?
+	`, sinkID).Scan(&merchantID, &kind, &status, &configBytes, &createdUnix, &updatedUnix)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.EventSink{}, false, nil
+	}
+	if err != nil {
+		return domain.EventSink{}, false, err
+	}
+
+	return domain.EventSink{
+		SinkID:     sinkID,
+		MerchantID: merchantID,
+		Kind:       domain.EventSinkKind(kind),
+		Status:     domain.EventSinkStatus(status),
+		Config:     configBytes,
+		CreatedAt:  time.Unix(createdUnix, 0).UTC(),
+		UpdatedAt:  time.Unix(updatedUnix, 0).UTC(),
+	}, true, nil
+}
+
+func (s *Store) ListEventSinks(ctx context.Context, merchantID string) ([]domain.EventSink, error) {
+	merchantID = strings.TrimSpace(merchantID)
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if merchantID == "" {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT sink_id, merchant_id, kind, status, config_json, created_at, updated_at
+			FROM event_sinks
+			ORDER BY created_at, sink_id
+		`)
+	} else {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT sink_id, merchant_id, kind, status, config_json, created_at, updated_at
+			FROM event_sinks
+			WHERE merchant_id = ?
+			ORDER BY created_at, sink_id
+		`, merchantID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.EventSink
+	for rows.Next() {
+		var (
+			sinkID      string
+			merchantID0 string
+			kind        string
+			status      string
+			configBytes []byte
+			createdUnix int64
+			updatedUnix int64
+		)
+		if err := rows.Scan(&sinkID, &merchantID0, &kind, &status, &configBytes, &createdUnix, &updatedUnix); err != nil {
+			return nil, err
+		}
+		out = append(out, domain.EventSink{
+			SinkID:     sinkID,
+			MerchantID: merchantID0,
+			Kind:       domain.EventSinkKind(kind),
+			Status:     domain.EventSinkStatus(status),
+			Config:     configBytes,
+			CreatedAt:  time.Unix(createdUnix, 0).UTC(),
+			UpdatedAt:  time.Unix(updatedUnix, 0).UTC(),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *Store) ListOutboundEvents(ctx context.Context, merchantID string, afterID int64, limit int) ([]domain.CloudEvent, int64, error) {
+	merchantID = strings.TrimSpace(merchantID)
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if merchantID == "" {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT id, envelope_json
+			FROM outbox_events
+			WHERE id > ?
+			ORDER BY id
+			LIMIT ?
+		`, afterID, limit)
+	} else {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT id, envelope_json
+			FROM outbox_events
+			WHERE merchant_id = ? AND id > ?
+			ORDER BY id
+			LIMIT ?
+		`, merchantID, afterID, limit)
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var out []domain.CloudEvent
+	var next int64
+	for rows.Next() {
+		var id int64
+		var b []byte
+		if err := rows.Scan(&id, &b); err != nil {
+			return nil, 0, err
+		}
+		var ce domain.CloudEvent
+		if err := json.Unmarshal(b, &ce); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, ce)
+		next = id
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return out, next, nil
+}
+
+func (s *Store) ListEventDeliveries(ctx context.Context, f store.EventDeliveryFilter) ([]domain.EventDelivery, error) {
+	f.MerchantID = strings.TrimSpace(f.MerchantID)
+	f.SinkID = strings.TrimSpace(f.SinkID)
+	if f.Limit <= 0 || f.Limit > 1000 {
+		f.Limit = 100
+	}
+
+	where := []string{"1=1"}
+	var args []any
+	if f.MerchantID != "" {
+		where = append(where, "merchant_id = ?")
+		args = append(args, f.MerchantID)
+	}
+	if f.SinkID != "" {
+		where = append(where, "sink_id = ?")
+		args = append(args, f.SinkID)
+	}
+	if f.Status != "" {
+		where = append(where, "status = ?")
+		args = append(args, string(f.Status))
+	}
+	args = append(args, f.Limit)
+
+	q := `
+		SELECT delivery_id, sink_id, event_id, status, attempt, next_retry_at, last_error, created_at, updated_at
+		FROM event_deliveries
+		WHERE ` + strings.Join(where, " AND ") + `
+		ORDER BY updated_at DESC
+		LIMIT ?
+	`
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.EventDelivery
+	for rows.Next() {
+		var (
+			deliveryID string
+			sinkID     string
+			eventID    string
+			status     string
+			attempt    int32
+			nextUnix   sql.NullInt64
+			lastErr    sql.NullString
+			createdUnix int64
+			updatedUnix int64
+		)
+		if err := rows.Scan(&deliveryID, &sinkID, &eventID, &status, &attempt, &nextUnix, &lastErr, &createdUnix, &updatedUnix); err != nil {
+			return nil, err
+		}
+		var nextRetry *time.Time
+		if nextUnix.Valid {
+			tm := time.Unix(nextUnix.Int64, 0).UTC()
+			nextRetry = &tm
+		}
+		var lastErrPtr *string
+		if lastErr.Valid {
+			s := lastErr.String
+			lastErrPtr = &s
+		}
+		out = append(out, domain.EventDelivery{
+			DeliveryID:  deliveryID,
+			SinkID:      sinkID,
+			EventID:     eventID,
+			Status:      domain.EventDeliveryStatus(status),
+			Attempt:     attempt,
+			NextRetryAt: nextRetry,
+			LastError:   lastErrPtr,
+			CreatedAt:   time.Unix(createdUnix, 0).UTC(),
+			UpdatedAt:   time.Unix(updatedUnix, 0).UTC(),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (s *Store) findInvoiceTx(ctx context.Context, tx *sql.Tx, merchantID, externalOrderID string) (domain.Invoice, bool, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT invoice_id, merchant_id, external_order_id, wallet_id, address_index, address, created_after_height, created_after_hash,
@@ -1090,7 +1410,7 @@ func (s *Store) insertInvoiceEventTx(ctx context.Context, tx *sql.Tx, invoiceID 
 		depHeight = dep.Height
 	}
 
-	_, err := tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		INSERT OR IGNORE INTO invoice_events (
 			invoice_id, type, occurred_at,
 			deposit_wallet_id, deposit_txid, deposit_action_index, deposit_amount_zat, deposit_height,
@@ -1101,7 +1421,121 @@ func (s *Store) insertInvoiceEventTx(ctx context.Context, tx *sql.Tx, invoiceID 
 		depWalletID, depTxID, depActionIndex, depAmountZat, depHeight,
 		nowUnix,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return nil
+	}
+	return s.enqueueOutboxForInvoiceEventTx(ctx, tx, invoiceID, typ, occurredAt, dep)
+}
+
+func (s *Store) enqueueOutboxForInvoiceEventTx(ctx context.Context, tx *sql.Tx, invoiceID string, typ domain.InvoiceEventType, occurredAt time.Time, dep *domain.DepositRef) error {
+	var merchantID string
+	var externalOrderID string
+	err := tx.QueryRowContext(ctx, `
+		SELECT merchant_id, external_order_id
+		FROM invoices
+		WHERE invoice_id = ?
+		LIMIT 1
+	`, invoiceID).Scan(&merchantID, &externalOrderID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	data := map[string]any{
+		"merchant_id":       merchantID,
+		"invoice_id":        invoiceID,
+		"external_order_id": externalOrderID,
+	}
+	if dep != nil {
+		data["deposit"] = map[string]any{
+			"wallet_id":    dep.WalletID,
+			"txid":         dep.TxID,
+			"action_index": dep.ActionIndex,
+			"amount_zat":   dep.AmountZat,
+			"height":       dep.Height,
+		}
+	}
+	dataBytes, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+
+	eventID, err := newID("evt")
+	if err != nil {
+		return err
+	}
+	ce := domain.CloudEvent{
+		SpecVersion:     "1.0",
+		ID:              eventID,
+		Source:          "juno-pay-server",
+		Type:            string(typ),
+		Subject:         "invoice/" + invoiceID,
+		Time:            occurredAt.UTC(),
+		DataContentType: "application/json",
+		Data:            dataBytes,
+	}
+	envBytes, err := json.Marshal(ce)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	nowUnix := now.Unix()
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO outbox_events (event_id, merchant_id, envelope_json, created_at)
+		VALUES (?, ?, ?, ?)
+	`, eventID, merchantID, envBytes, nowUnix); err != nil {
+		return err
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT sink_id
+		FROM event_sinks
+		WHERE merchant_id = ? AND status = ?
+	`, merchantID, string(domain.EventSinkActive))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var sinkID string
+		if err := rows.Scan(&sinkID); err != nil {
+			return err
+		}
+		deliveryID, err := newID("del")
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO event_deliveries (
+				delivery_id, merchant_id, sink_id, event_id,
+				status, attempt, next_retry_at, last_error,
+				created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`,
+			deliveryID, merchantID, sinkID, eventID,
+			string(domain.EventDeliveryPending), 0, nowUnix, nil,
+			nowUnix, nowUnix,
+		); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.ScanEvent) error {

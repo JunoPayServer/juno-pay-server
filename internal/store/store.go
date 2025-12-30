@@ -52,6 +52,19 @@ type ScanEvent struct {
 	OccurredAt time.Time
 }
 
+type EventSinkCreate struct {
+	MerchantID string
+	Kind       domain.EventSinkKind
+	Config     json.RawMessage
+}
+
+type EventDeliveryFilter struct {
+	MerchantID string
+	SinkID     string
+	Status     domain.EventDeliveryStatus
+	Limit      int
+}
+
 type Store interface {
 	// Merchants
 	CreateMerchant(ctx context.Context, name string, settings domain.MerchantSettings) (domain.Merchant, error)
@@ -85,4 +98,11 @@ type Store interface {
 
 	// Invoice events (for polling and SSE).
 	ListInvoiceEvents(ctx context.Context, invoiceID string, afterID int64, limit int) (events []domain.InvoiceEvent, nextCursor int64, err error)
+
+	// Outbound events (webhook/brokers) + sinks.
+	CreateEventSink(ctx context.Context, req EventSinkCreate) (domain.EventSink, error)
+	GetEventSink(ctx context.Context, sinkID string) (domain.EventSink, bool, error)
+	ListEventSinks(ctx context.Context, merchantID string) ([]domain.EventSink, error)
+	ListOutboundEvents(ctx context.Context, merchantID string, afterID int64, limit int) (events []domain.CloudEvent, nextCursor int64, err error)
+	ListEventDeliveries(ctx context.Context, f EventDeliveryFilter) ([]domain.EventDelivery, error)
 }
