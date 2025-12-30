@@ -126,6 +126,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/admin/event-deliveries", s.handleAdminEventDeliveries)
 	mux.HandleFunc("/v1/admin/invoices", s.handleAdminInvoices)
 	mux.HandleFunc("/v1/admin/invoices/", s.handleAdminInvoiceSubroutes)
+	mux.HandleFunc("/v1/admin/deposits", s.handleAdminDeposits)
 	return mux
 }
 
@@ -1437,6 +1438,68 @@ func (s *Server) handleAdminInvoiceSubroutes(w http.ResponseWriter, r *http.Requ
 	})
 }
 
+func (s *Server) handleAdminDeposits(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.requireAdmin(w, r) {
+		return
+	}
+
+	merchantID := strings.TrimSpace(r.URL.Query().Get("merchant_id"))
+	invoiceID := strings.TrimSpace(r.URL.Query().Get("invoice_id"))
+	txid := strings.TrimSpace(r.URL.Query().Get("txid"))
+
+	afterID := int64(0)
+	if v := strings.TrimSpace(r.URL.Query().Get("cursor")); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			writeError(w, http.StatusBadRequest, "invalid_argument", "invalid cursor")
+			return
+		}
+		afterID = n
+	}
+
+	limit := 100
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 500 {
+			writeError(w, http.StatusBadRequest, "invalid_argument", "invalid limit")
+			return
+		}
+		limit = n
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	deps, nextCursor, err := s.st.ListDeposits(ctx, store.DepositFilter{
+		MerchantID: merchantID,
+		InvoiceID:  invoiceID,
+		TxID:       txid,
+		AfterID:    afterID,
+		Limit:      limit,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+
+	out := make([]any, 0, len(deps))
+	for _, d := range deps {
+		out = append(out, toDepositJSON(d))
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok",
+		"data": map[string]any{
+			"deposits":    out,
+			"next_cursor": strconv.FormatInt(nextCursor, 10),
+		},
+	})
+}
+
 func toMerchantJSON(m domain.Merchant) map[string]any {
 	return map[string]any{
 		"merchant_id": m.MerchantID,
@@ -1485,6 +1548,31 @@ func toEventSinkJSON(sink domain.EventSink) map[string]any {
 		"config":      cfg,
 		"created_at":  sink.CreatedAt.UTC().Format(time.RFC3339Nano),
 		"updated_at":  sink.UpdatedAt.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func toDepositJSON(d domain.Deposit) map[string]any {
+	var confirmedHeight any = nil
+	if d.ConfirmedHeight != nil {
+		confirmedHeight = *d.ConfirmedHeight
+	}
+	var invoiceID any = nil
+	if d.InvoiceID != nil && strings.TrimSpace(*d.InvoiceID) != "" {
+		invoiceID = *d.InvoiceID
+	}
+
+	return map[string]any{
+		"wallet_id":         d.WalletID,
+		"txid":              d.TxID,
+		"action_index":      d.ActionIndex,
+		"recipient_address": d.RecipientAddress,
+		"amount_zat":        d.AmountZat,
+		"height":            d.Height,
+		"status":            string(d.Status),
+		"confirmed_height":  confirmedHeight,
+		"invoice_id":        invoiceID,
+		"detected_at":       d.DetectedAt.UTC().Format(time.RFC3339Nano),
+		"updated_at":        d.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
 }
 
