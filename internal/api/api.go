@@ -124,6 +124,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/admin/event-sinks/", s.handleAdminEventSinkSubroutes)
 	mux.HandleFunc("/v1/admin/events", s.handleAdminEvents)
 	mux.HandleFunc("/v1/admin/event-deliveries", s.handleAdminEventDeliveries)
+	mux.HandleFunc("/v1/admin/review-cases", s.handleAdminReviewCases)
+	mux.HandleFunc("/v1/admin/review-cases/", s.handleAdminReviewCaseSubroutes)
 	mux.HandleFunc("/v1/admin/invoices", s.handleAdminInvoices)
 	mux.HandleFunc("/v1/admin/invoices/", s.handleAdminInvoiceSubroutes)
 	mux.HandleFunc("/v1/admin/deposits", s.handleAdminDeposits)
@@ -1318,6 +1320,121 @@ func (s *Server) handleAdminEventDeliveries(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+func (s *Server) handleAdminReviewCases(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.requireAdmin(w, r) {
+		return
+	}
+
+	merchantID := strings.TrimSpace(r.URL.Query().Get("merchant_id"))
+	status := domain.ReviewStatus(strings.TrimSpace(r.URL.Query().Get("status")))
+	switch status {
+	case "", domain.ReviewOpen, domain.ReviewResolved, domain.ReviewRejected:
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_argument", "invalid status")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	cases, err := s.st.ListReviewCases(ctx, store.ReviewCaseFilter{
+		MerchantID: merchantID,
+		Status:     status,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+
+	out := make([]any, 0, len(cases))
+	for _, c := range cases {
+		out = append(out, toReviewCaseJSON(c))
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok",
+		"data":   out,
+	})
+}
+
+func (s *Server) handleAdminReviewCaseSubroutes(w http.ResponseWriter, r *http.Request) {
+	// /v1/admin/review-cases/{review_id}/(resolve|reject)
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	path := strings.TrimPrefix(r.URL.Path, "/v1/admin/review-cases/")
+	path = strings.Trim(path, "/")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 {
+		http.NotFound(w, r)
+		return
+	}
+	reviewID := strings.TrimSpace(parts[0])
+	action := strings.TrimSpace(parts[1])
+	if reviewID == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	var req struct {
+		Notes string `json:"notes"`
+	}
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", "invalid json")
+		return
+	}
+	req.Notes = strings.TrimSpace(req.Notes)
+	if req.Notes == "" {
+		writeError(w, http.StatusBadRequest, "invalid_argument", "notes is required")
+		return
+	}
+	if len(req.Notes) > 4096 {
+		writeError(w, http.StatusBadRequest, "invalid_argument", "notes too long")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	var err error
+	switch action {
+	case "resolve":
+		err = s.st.ResolveReviewCase(ctx, reviewID, req.Notes)
+	case "reject":
+		err = s.st.RejectReviewCase(ctx, reviewID, req.Notes)
+	default:
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "review case not found")
+			return
+		}
+		if de, ok := domain.AsError(err); ok && de.Code == domain.ErrInvalidArgument {
+			writeError(w, http.StatusBadRequest, string(de.Code), de.Message)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok",
+	})
+}
+
 func (s *Server) handleAdminInvoices(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1743,6 +1860,24 @@ func toRefundJSON(r domain.Refund) map[string]any {
 		"notes":              r.Notes,
 		"created_at":         r.CreatedAt.UTC().Format(time.RFC3339Nano),
 		"updated_at":         r.UpdatedAt.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func toReviewCaseJSON(c domain.ReviewCase) map[string]any {
+	var invoiceID any = nil
+	if c.InvoiceID != nil && strings.TrimSpace(*c.InvoiceID) != "" {
+		invoiceID = *c.InvoiceID
+	}
+
+	return map[string]any{
+		"review_id":   c.ReviewID,
+		"merchant_id": c.MerchantID,
+		"invoice_id":  invoiceID,
+		"reason":      string(c.Reason),
+		"status":      string(c.Status),
+		"notes":       c.Notes,
+		"created_at":  c.CreatedAt.UTC().Format(time.RFC3339Nano),
+		"updated_at":  c.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
 }
 
