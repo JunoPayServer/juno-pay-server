@@ -1290,6 +1290,141 @@ func (s *Store) ListEventDeliveries(ctx context.Context, f store.EventDeliveryFi
 	return out, nil
 }
 
+func (s *Store) ListDueDeliveries(ctx context.Context, now time.Time, limit int) ([]store.DueDelivery, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	nowUnix := now.UTC().Unix()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT d.delivery_id, d.merchant_id, d.sink_id, d.event_id, d.status, d.attempt, d.next_retry_at, d.last_error, d.created_at, d.updated_at,
+		       s.kind, s.status, s.config_json, s.created_at, s.updated_at,
+		       e.envelope_json
+		FROM event_deliveries d
+		JOIN event_sinks s ON s.sink_id = d.sink_id
+		JOIN outbox_events e ON e.event_id = d.event_id
+		WHERE d.status = ? AND s.status = ? AND (d.next_retry_at IS NULL OR d.next_retry_at <= ?)
+		ORDER BY d.updated_at, d.delivery_id
+		LIMIT ?
+	`, string(domain.EventDeliveryPending), string(domain.EventSinkActive), nowUnix, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []store.DueDelivery
+	for rows.Next() {
+		var (
+			deliveryID  string
+			merchantID  string
+			sinkID      string
+			eventID     string
+			dStatus     string
+			attempt     int32
+			nextUnix    sql.NullInt64
+			lastErr     sql.NullString
+			dCreatedUnix int64
+			dUpdatedUnix int64
+
+			sKind       string
+			sStatus     string
+			sConfig     []byte
+			sCreatedUnix int64
+			sUpdatedUnix int64
+
+			envBytes []byte
+		)
+		if err := rows.Scan(
+			&deliveryID, &merchantID, &sinkID, &eventID, &dStatus, &attempt, &nextUnix, &lastErr, &dCreatedUnix, &dUpdatedUnix,
+			&sKind, &sStatus, &sConfig, &sCreatedUnix, &sUpdatedUnix,
+			&envBytes,
+		); err != nil {
+			return nil, err
+		}
+
+		var nextRetry *time.Time
+		if nextUnix.Valid {
+			tm := time.Unix(nextUnix.Int64, 0).UTC()
+			nextRetry = &tm
+		}
+		var lastErrPtr *string
+		if lastErr.Valid {
+			s := lastErr.String
+			lastErrPtr = &s
+		}
+
+		var ce domain.CloudEvent
+		if err := json.Unmarshal(envBytes, &ce); err != nil {
+			return nil, err
+		}
+
+		out = append(out, store.DueDelivery{
+			Delivery: domain.EventDelivery{
+				DeliveryID:  deliveryID,
+				SinkID:      sinkID,
+				EventID:     eventID,
+				Status:      domain.EventDeliveryStatus(dStatus),
+				Attempt:     attempt,
+				NextRetryAt: nextRetry,
+				LastError:   lastErrPtr,
+				CreatedAt:   time.Unix(dCreatedUnix, 0).UTC(),
+				UpdatedAt:   time.Unix(dUpdatedUnix, 0).UTC(),
+			},
+			Sink: domain.EventSink{
+				SinkID:     sinkID,
+				MerchantID: merchantID,
+				Kind:       domain.EventSinkKind(sKind),
+				Status:     domain.EventSinkStatus(sStatus),
+				Config:     sConfig,
+				CreatedAt:  time.Unix(sCreatedUnix, 0).UTC(),
+				UpdatedAt:  time.Unix(sUpdatedUnix, 0).UTC(),
+			},
+			Event: ce,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *Store) UpdateEventDelivery(ctx context.Context, deliveryID string, status domain.EventDeliveryStatus, attempt int32, nextRetryAt *time.Time, lastError *string) error {
+	deliveryID = strings.TrimSpace(deliveryID)
+	if deliveryID == "" {
+		return domain.NewError(domain.ErrInvalidArgument, "delivery_id is required")
+	}
+
+	nowUnix := time.Now().UTC().Unix()
+	var nextUnix any = nil
+	if nextRetryAt != nil {
+		nextUnix = nextRetryAt.UTC().Unix()
+	}
+	var lastErrAny any = nil
+	if lastError != nil {
+		lastErrAny = *lastError
+	}
+
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE event_deliveries
+		SET status = ?, attempt = ?, next_retry_at = ?, last_error = ?, updated_at = ?
+		WHERE delivery_id = ?
+	`, string(status), attempt, nextUnix, lastErrAny, nowUnix, deliveryID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) findInvoiceTx(ctx context.Context, tx *sql.Tx, merchantID, externalOrderID string) (domain.Invoice, bool, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT invoice_id, merchant_id, external_order_id, wallet_id, address_index, address, created_after_height, created_after_hash,

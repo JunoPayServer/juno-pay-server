@@ -894,3 +894,73 @@ func (s *MemStore) ListEventDeliveries(_ context.Context, f EventDeliveryFilter)
 	}
 	return out, nil
 }
+
+func (s *MemStore) ListDueDeliveries(_ context.Context, now time.Time, limit int) ([]DueDelivery, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	findEvent := func(eventID string) (domain.CloudEvent, bool) {
+		for i := len(s.outbox) - 1; i >= 0; i-- {
+			if s.outbox[i].Event.ID == eventID {
+				return s.outbox[i].Event, true
+			}
+		}
+		return domain.CloudEvent{}, false
+	}
+
+	out := make([]DueDelivery, 0, limit)
+	for _, d := range s.deliveries {
+		if d.Status != domain.EventDeliveryPending {
+			continue
+		}
+		if d.NextRetryAt != nil && d.NextRetryAt.After(now) {
+			continue
+		}
+		sink, ok := s.eventSinks[d.SinkID]
+		if !ok || sink.Status != domain.EventSinkActive {
+			continue
+		}
+		ev, ok := findEvent(d.EventID)
+		if !ok {
+			continue
+		}
+		out = append(out, DueDelivery{
+			Delivery: d,
+			Sink:     sink,
+			Event:    ev,
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (s *MemStore) UpdateEventDelivery(_ context.Context, deliveryID string, status domain.EventDeliveryStatus, attempt int32, nextRetryAt *time.Time, lastError *string) error {
+	deliveryID = strings.TrimSpace(deliveryID)
+	if deliveryID == "" {
+		return domain.NewError(domain.ErrInvalidArgument, "delivery_id is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, ok := s.deliveries[deliveryID]
+	if !ok {
+		return ErrNotFound
+	}
+	d.Status = status
+	d.Attempt = attempt
+	d.NextRetryAt = nextRetryAt
+	d.LastError = lastError
+	d.UpdatedAt = time.Now().UTC()
+	s.deliveries[deliveryID] = d
+	return nil
+}

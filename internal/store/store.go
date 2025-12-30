@@ -65,6 +65,12 @@ type EventDeliveryFilter struct {
 	Limit      int
 }
 
+type DueDelivery struct {
+	Delivery domain.EventDelivery
+	Sink     domain.EventSink
+	Event    domain.CloudEvent
+}
+
 type Store interface {
 	// Merchants
 	CreateMerchant(ctx context.Context, name string, settings domain.MerchantSettings) (domain.Merchant, error)
@@ -105,4 +111,6 @@ type Store interface {
 	ListEventSinks(ctx context.Context, merchantID string) ([]domain.EventSink, error)
 	ListOutboundEvents(ctx context.Context, merchantID string, afterID int64, limit int) (events []domain.CloudEvent, nextCursor int64, err error)
 	ListEventDeliveries(ctx context.Context, f EventDeliveryFilter) ([]domain.EventDelivery, error)
+	ListDueDeliveries(ctx context.Context, now time.Time, limit int) ([]DueDelivery, error)
+	UpdateEventDelivery(ctx context.Context, deliveryID string, status domain.EventDeliveryStatus, attempt int32, nextRetryAt *time.Time, lastError *string) error
 }
