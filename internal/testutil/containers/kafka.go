@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
 	dockercontainer "github.com/docker/docker/api/types/container"
@@ -22,6 +23,26 @@ type Kafka struct {
 }
 
 func StartKafka(ctx context.Context) (*Kafka, error) {
+	var lastErr error
+	for attempt := 0; attempt < 10; attempt++ {
+		k, err := startKafkaOnce(ctx)
+		if err == nil {
+			return k, nil
+		}
+		lastErr = err
+		if !isPortAllocatedErr(err) {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	return nil, lastErr
+}
+
+func startKafkaOnce(ctx context.Context) (*Kafka, error) {
 	hostPort, err := freePort()
 	if err != nil {
 		return nil, err
@@ -38,7 +59,7 @@ func StartKafka(ctx context.Context) (*Kafka, error) {
 	}
 
 	zkReq := testcontainers.ContainerRequest{
-		Image:        "confluentinc/cp-zookeeper:7.6.1",
+		Image:         "confluentinc/cp-zookeeper:7.6.1",
 		ImagePlatform: "linux/amd64",
 		Env: map[string]string{
 			"ZOOKEEPER_CLIENT_PORT": "2181",
@@ -56,13 +77,13 @@ func StartKafka(ctx context.Context) (*Kafka, error) {
 	}
 
 	kafkaReq := testcontainers.ContainerRequest{
-		Image:        "confluentinc/cp-kafka:7.6.1",
+		Image:         "confluentinc/cp-kafka:7.6.1",
 		ImagePlatform: "linux/amd64",
 		Env: map[string]string{
-			"KAFKA_BROKER_ID":                        "1",
-			"KAFKA_ZOOKEEPER_CONNECT":               "zookeeper:2181",
-			"KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR": "1",
-			"KAFKA_TRANSACTION_STATE_LOG_MIN_ISR":    "1",
+			"KAFKA_BROKER_ID":                                "1",
+			"KAFKA_ZOOKEEPER_CONNECT":                        "zookeeper:2181",
+			"KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR":         "1",
+			"KAFKA_TRANSACTION_STATE_LOG_MIN_ISR":            "1",
 			"KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR": "1",
 			"KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS":         "0",
 			"KAFKA_AUTO_CREATE_TOPICS_ENABLE":                "true",
@@ -107,6 +128,16 @@ func StartKafka(ctx context.Context) (*Kafka, error) {
 	}, nil
 }
 
+func isPortAllocatedErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "port is already allocated") ||
+		strings.Contains(msg, "Bind for") ||
+		strings.Contains(msg, "failed to set up container networking")
+}
+
 func (k *Kafka) Terminate(ctx context.Context) error {
 	if k == nil {
 		return nil
@@ -131,4 +162,3 @@ func freePort() (int, error) {
 	defer ln.Close()
 	return ln.Addr().(*net.TCPAddr).Port, nil
 }
-
