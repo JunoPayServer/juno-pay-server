@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -162,6 +163,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/logout", s.handleAdminLogout)
 	mux.HandleFunc("/v1/health", s.handleHealth)
 	mux.HandleFunc("/v1/status", s.handleStatus)
+	mux.HandleFunc("/v1/demo/air/purchase", s.handleDemoAirPurchase)
 	mux.HandleFunc("/v1/invoices", s.handleInvoices)
 	mux.HandleFunc("/v1/public/invoices/", s.handlePublicInvoices)
 	mux.HandleFunc("/v1/admin/status", s.handleAdminStatus)
@@ -255,6 +257,134 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"event_delivery": map[string]any{
 				"pending_deliveries": pendingDeliveries,
 			},
+		},
+	})
+}
+
+func (s *Server) handleDemoAirPurchase(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		BuyerID string `json:"buyer_id"`
+	}
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid_json", "invalid json")
+		return
+	}
+	req.BuyerID = strings.TrimSpace(req.BuyerID)
+	if len(req.BuyerID) > 256 {
+		writeError(w, http.StatusBadRequest, "invalid_argument", "buyer_id too long")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	merchants, err := s.st.ListMerchants(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+	if len(merchants) != 1 {
+		writeError(w, http.StatusBadRequest, "demo_unconfigured", "demo requires exactly one merchant")
+		return
+	}
+	merchantID := merchants[0].MerchantID
+
+	m, ok, err := s.st.GetMerchant(ctx, merchantID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "internal", "merchant missing")
+		return
+	}
+	if err := m.Settings.Validate(); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "invalid merchant settings")
+		return
+	}
+
+	wallet, found, err := s.st.GetMerchantWallet(ctx, merchantID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+	if !found {
+		writeError(w, http.StatusConflict, "wallet_not_set", "merchant wallet is not set")
+		return
+	}
+
+	addrIndex, err := s.st.NextAddressIndex(ctx, merchantID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+	addr, err := s.deriver.Derive(wallet.UFVK, wallet.UAHRP, addrIndex)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "address derivation failed")
+		return
+	}
+
+	tipHeight, tipHash, err := s.tip.BestTip(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "tip error")
+		return
+	}
+
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "random failed")
+		return
+	}
+	externalOrderID := "demo-air-" + hex.EncodeToString(raw[:])
+
+	var expiresAt *time.Time
+	if ttl := m.Settings.InvoiceTTL(); ttl > 0 {
+		exp := s.clock.Now().UTC().Add(ttl)
+		expiresAt = &exp
+	}
+
+	const oneJUNOZat = 100_000_000
+
+	inv, _, err := s.st.CreateInvoice(ctx, store.InvoiceCreate{
+		MerchantID:            merchantID,
+		ExternalOrderID:       externalOrderID,
+		WalletID:              wallet.WalletID,
+		AddressIndex:          addrIndex,
+		Address:               addr,
+		CreatedAfterHeight:    tipHeight,
+		CreatedAfterHash:      tipHash,
+		AmountZat:             oneJUNOZat,
+		RequiredConfirmations: m.Settings.RequiredConfirmations,
+		Policies:              m.Settings.Policies,
+		ExpiresAt:             expiresAt,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+
+	token, err := s.tokenGen.NewInvoiceToken()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "token generation failed")
+		return
+	}
+	if err := s.st.PutInvoiceToken(ctx, inv.InvoiceID, token); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"status": "ok",
+		"data": map[string]any{
+			"invoice":       toInvoiceJSON(inv),
+			"invoice_token": token,
 		},
 	})
 }
