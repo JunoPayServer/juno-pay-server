@@ -5,12 +5,15 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Abdullah1738/juno-pay-server/internal/domain"
+	"github.com/Abdullah1738/juno-sdk-go/types"
 )
 
 type MemStore struct {
@@ -19,8 +22,8 @@ type MemStore struct {
 	merchantSeq int64
 	invoiceSeq  int64
 
-	merchants      map[string]domain.Merchant
-	merchantWallet map[string]MerchantWallet
+	merchants        map[string]domain.Merchant
+	merchantWallet   map[string]MerchantWallet
 	nextAddressIndex map[string]uint32 // merchant_id -> next address index
 
 	invoices          map[string]domain.Invoice
@@ -29,9 +32,15 @@ type MemStore struct {
 
 	invoiceToken map[string]string // invoice_id -> token (plaintext; tests/dev only)
 
-	apiKeySeq   int64
-	apiKeysByID map[string]apiKeyRecord
+	apiKeySeq     int64
+	apiKeysByID   map[string]apiKeyRecord
 	apiKeysByHash map[string]string // sha256(token) hex -> key_id
+
+	scanCursor map[string]int64 // wallet_id -> last applied cursor
+	deposits   map[string]depositRecord
+
+	invoiceEventSeq int64
+	invoiceEvents   map[string][]domain.InvoiceEvent // invoice_id -> events
 }
 
 type apiKeyRecord struct {
@@ -42,17 +51,33 @@ type apiKeyRecord struct {
 	CreatedAt  time.Time
 }
 
+type depositRecord struct {
+	WalletID         string
+	TxID             string
+	ActionIndex      int32
+	RecipientAddress string
+	AmountZat        int64
+	Height           int64
+	Status           string
+	ConfirmedHeight  *int64
+	InvoiceID        string
+	UpdatedAt        time.Time
+}
+
 func NewMem() *MemStore {
 	return &MemStore{
-		merchants:        make(map[string]domain.Merchant),
-		merchantWallet:   make(map[string]MerchantWallet),
-		nextAddressIndex: make(map[string]uint32),
-		invoices:         make(map[string]domain.Invoice),
+		merchants:         make(map[string]domain.Merchant),
+		merchantWallet:    make(map[string]MerchantWallet),
+		nextAddressIndex:  make(map[string]uint32),
+		invoices:          make(map[string]domain.Invoice),
 		invoiceByExternal: make(map[string]map[string]string),
-		invoiceByAddress: make(map[string]string),
-		invoiceToken:     make(map[string]string),
-		apiKeysByID:      make(map[string]apiKeyRecord),
-		apiKeysByHash:    make(map[string]string),
+		invoiceByAddress:  make(map[string]string),
+		invoiceToken:      make(map[string]string),
+		apiKeysByID:       make(map[string]apiKeyRecord),
+		apiKeysByHash:     make(map[string]string),
+		scanCursor:        make(map[string]int64),
+		deposits:          make(map[string]depositRecord),
+		invoiceEvents:     make(map[string][]domain.InvoiceEvent),
 	}
 }
 
@@ -311,26 +336,28 @@ func (s *MemStore) CreateInvoice(_ context.Context, req InvoiceCreate) (domain.I
 	id := fmt.Sprintf("inv_%016x", s.invoiceSeq)
 
 	inv := domain.Invoice{
-		InvoiceID:         id,
-		MerchantID:        req.MerchantID,
-		ExternalOrderID:   req.ExternalOrderID,
-		WalletID:          req.WalletID,
-		AddressIndex:      req.AddressIndex,
-		Address:           req.Address,
-		CreatedAfterHeight: req.CreatedAfterHeight,
-		CreatedAfterHash:   req.CreatedAfterHash,
-		AmountZat:          req.AmountZat,
+		InvoiceID:             id,
+		MerchantID:            req.MerchantID,
+		ExternalOrderID:       req.ExternalOrderID,
+		WalletID:              req.WalletID,
+		AddressIndex:          req.AddressIndex,
+		Address:               req.Address,
+		CreatedAfterHeight:    req.CreatedAfterHeight,
+		CreatedAfterHash:      req.CreatedAfterHash,
+		AmountZat:             req.AmountZat,
 		RequiredConfirmations: req.RequiredConfirmations,
 		Policies:              req.Policies,
 		Status:                domain.InvoiceOpen,
-		ExpiresAt:              req.ExpiresAt,
-		CreatedAt:              now,
-		UpdatedAt:              now,
+		ExpiresAt:             req.ExpiresAt,
+		CreatedAt:             now,
+		UpdatedAt:             now,
 	}
 
 	s.invoices[id] = inv
 	extMap[req.ExternalOrderID] = id
 	s.invoiceByAddress[addrKey] = id
+
+	s.appendInvoiceEventLocked(id, domain.InvoiceEventInvoiceCreated, now, nil)
 
 	return inv, true, nil
 }
@@ -384,4 +411,275 @@ func (s *MemStore) GetInvoiceToken(_ context.Context, invoiceID string) (token s
 	defer s.mu.Unlock()
 	token, ok = s.invoiceToken[invoiceID]
 	return token, ok, nil
+}
+
+func (s *MemStore) ListMerchantWallets(_ context.Context) ([]MerchantWallet, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]MerchantWallet, 0, len(s.merchantWallet))
+	for _, w := range s.merchantWallet {
+		out = append(out, w)
+	}
+	return out, nil
+}
+
+func (s *MemStore) ScanCursor(_ context.Context, walletID string) (int64, error) {
+	walletID = strings.TrimSpace(walletID)
+	if walletID == "" {
+		return 0, domain.NewError(domain.ErrInvalidArgument, "wallet_id is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.scanCursor[walletID], nil
+}
+
+func (s *MemStore) ApplyScanEvent(_ context.Context, ev ScanEvent) error {
+	ev.WalletID = strings.TrimSpace(ev.WalletID)
+	ev.Kind = strings.TrimSpace(ev.Kind)
+	if ev.WalletID == "" {
+		return domain.NewError(domain.ErrInvalidArgument, "wallet_id is required")
+	}
+	if ev.Cursor <= 0 {
+		return domain.NewError(domain.ErrInvalidArgument, "cursor must be > 0")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if cur := s.scanCursor[ev.WalletID]; ev.Cursor <= cur {
+		return nil
+	}
+
+	switch types.WalletEventKind(ev.Kind) {
+	case types.WalletEventKindDepositEvent:
+		var p types.DepositEventPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		s.applyDepositLocked(ev, p.WalletID, p.TxID, int32(p.ActionIndex), p.RecipientAddress, p.AmountZatoshis, p.Height, "detected", nil)
+	case types.WalletEventKindDepositConfirmed:
+		var p types.DepositConfirmedPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		ch := p.ConfirmedHeight
+		s.applyDepositLocked(ev, p.WalletID, p.TxID, int32(p.ActionIndex), p.RecipientAddress, p.AmountZatoshis, p.Height, "confirmed", &ch)
+	case types.WalletEventKindDepositUnconfirmed:
+		var p types.DepositUnconfirmedPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		s.applyDepositLocked(ev, p.WalletID, p.TxID, int32(p.ActionIndex), p.RecipientAddress, p.AmountZatoshis, p.Height, "unconfirmed", nil)
+	case types.WalletEventKindDepositOrphaned:
+		var p types.DepositOrphanedPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		s.applyDepositLocked(ev, p.WalletID, p.TxID, int32(p.ActionIndex), p.RecipientAddress, p.AmountZatoshis, p.Height, "orphaned", nil)
+	default:
+		// Ignore other event kinds.
+	}
+
+	s.scanCursor[ev.WalletID] = ev.Cursor
+	return nil
+}
+
+func (s *MemStore) ListInvoiceEvents(_ context.Context, invoiceID string, afterID int64, limit int) ([]domain.InvoiceEvent, int64, error) {
+	invoiceID = strings.TrimSpace(invoiceID)
+	if invoiceID == "" {
+		return nil, 0, domain.NewError(domain.ErrInvalidArgument, "invoice_id is required")
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	evs := s.invoiceEvents[invoiceID]
+	if len(evs) == 0 {
+		return nil, 0, nil
+	}
+
+	out := make([]domain.InvoiceEvent, 0, limit)
+	var nextCursor int64 = 0
+	for _, e := range evs {
+		idNum, _ := strconv.ParseInt(e.EventID, 10, 64)
+		if idNum <= afterID {
+			continue
+		}
+		out = append(out, e)
+		nextCursor = idNum
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nextCursor, nil
+}
+
+func (s *MemStore) applyDepositLocked(ev ScanEvent, walletID, txid string, actionIndex int32, recipientAddress string, amountZatoshis uint64, height int64, status string, confirmedHeight *int64) {
+	if walletID == "" {
+		walletID = ev.WalletID
+	}
+	if recipientAddress == "" {
+		return
+	}
+
+	maxInt64 := uint64(^uint64(0) >> 1)
+	if amountZatoshis > maxInt64 {
+		return
+	}
+	amountZat := int64(amountZatoshis)
+
+	addr := strings.ToLower(strings.TrimSpace(recipientAddress))
+	addrKey := walletID + "|" + addr
+	invoiceID := ""
+	if invID, ok := s.invoiceByAddress[addrKey]; ok {
+		inv := s.invoices[invID]
+		if inv.CanApplyDeposit(height) {
+			invoiceID = invID
+		}
+	}
+
+	depKey := walletID + "|" + txid + "|" + strconv.FormatInt(int64(actionIndex), 10)
+	rec, ok := s.deposits[depKey]
+	if !ok {
+		rec = depositRecord{
+			WalletID:         walletID,
+			TxID:             txid,
+			ActionIndex:      actionIndex,
+			RecipientAddress: addr,
+			AmountZat:        amountZat,
+			Height:           height,
+			Status:           status,
+			ConfirmedHeight:  confirmedHeight,
+			InvoiceID:        invoiceID,
+			UpdatedAt:        time.Now().UTC(),
+		}
+	} else {
+		rec.Status = status
+		rec.ConfirmedHeight = confirmedHeight
+		rec.UpdatedAt = time.Now().UTC()
+		if rec.InvoiceID == "" && invoiceID != "" {
+			rec.InvoiceID = invoiceID
+		}
+	}
+	s.deposits[depKey] = rec
+
+	if rec.InvoiceID == "" {
+		return
+	}
+
+	depRef := &domain.DepositRef{
+		WalletID:    walletID,
+		TxID:        txid,
+		ActionIndex: actionIndex,
+		AmountZat:   amountZat,
+		Height:      height,
+	}
+
+	switch status {
+	case "detected":
+		s.appendInvoiceEventLocked(rec.InvoiceID, domain.InvoiceEventDepositDetected, ev.OccurredAt.UTC(), depRef)
+	case "confirmed":
+		s.appendInvoiceEventLocked(rec.InvoiceID, domain.InvoiceEventDepositConfirmed, ev.OccurredAt.UTC(), depRef)
+	}
+
+	s.recomputeInvoiceLocked(rec.InvoiceID)
+}
+
+func (s *MemStore) recomputeInvoiceLocked(invoiceID string) {
+	inv, ok := s.invoices[invoiceID]
+	if !ok {
+		return
+	}
+	var pending int64
+	var confirmed int64
+	for _, d := range s.deposits {
+		if d.InvoiceID != invoiceID {
+			continue
+		}
+		switch d.Status {
+		case "confirmed":
+			confirmed += d.AmountZat
+		case "detected", "unconfirmed":
+			pending += d.AmountZat
+		}
+	}
+
+	inv.ReceivedPendingZat = pending
+	inv.ReceivedConfirmedZat = confirmed
+
+	prevStatus := inv.Status
+	now := time.Now().UTC()
+	inv.Status = computeInvoiceStatus(inv, now)
+	inv.UpdatedAt = now
+	s.invoices[invoiceID] = inv
+
+	if inv.Status != prevStatus {
+		switch inv.Status {
+		case domain.InvoiceExpired:
+			s.appendInvoiceEventLocked(invoiceID, domain.InvoiceEventInvoiceExpired, now, nil)
+		case domain.InvoicePaid, domain.InvoicePaidLate:
+			s.appendInvoiceEventLocked(invoiceID, domain.InvoiceEventInvoicePaid, now, nil)
+		case domain.InvoiceOverpaid:
+			s.appendInvoiceEventLocked(invoiceID, domain.InvoiceEventInvoiceOverpaid, now, nil)
+		}
+	}
+}
+
+func computeInvoiceStatus(inv domain.Invoice, now time.Time) domain.InvoiceStatus {
+	expired := inv.ExpiresAt != nil && now.After(inv.ExpiresAt.UTC())
+
+	switch {
+	case inv.ReceivedConfirmedZat == 0 && expired:
+		return domain.InvoiceExpired
+	case inv.ReceivedConfirmedZat == 0:
+		return domain.InvoiceOpen
+	case inv.ReceivedConfirmedZat < inv.AmountZat:
+		return domain.InvoicePartial
+	case inv.ReceivedConfirmedZat == inv.AmountZat:
+		if expired && inv.Policies.LatePayment == domain.LatePaymentMarkPaidLate {
+			return domain.InvoicePaidLate
+		}
+		return domain.InvoicePaid
+	default:
+		return domain.InvoiceOverpaid
+	}
+}
+
+func (s *MemStore) appendInvoiceEventLocked(invoiceID string, typ domain.InvoiceEventType, occurredAt time.Time, dep *domain.DepositRef) {
+	if invoiceID == "" {
+		return
+	}
+
+	// Ensure idempotency for deposit events by checking existing refs.
+	if dep != nil {
+		for _, e := range s.invoiceEvents[invoiceID] {
+			if e.Type != typ || e.Deposit == nil {
+				continue
+			}
+			if e.Deposit.WalletID == dep.WalletID &&
+				e.Deposit.TxID == dep.TxID &&
+				e.Deposit.ActionIndex == dep.ActionIndex {
+				return
+			}
+		}
+	} else {
+		for _, e := range s.invoiceEvents[invoiceID] {
+			if e.Type == typ && e.Deposit == nil {
+				return
+			}
+		}
+	}
+
+	s.invoiceEventSeq++
+	idStr := strconv.FormatInt(s.invoiceEventSeq, 10)
+	s.invoiceEvents[invoiceID] = append(s.invoiceEvents[invoiceID], domain.InvoiceEvent{
+		EventID:    idStr,
+		Type:       typ,
+		OccurredAt: occurredAt,
+		InvoiceID:  invoiceID,
+		Deposit:    dep,
+	})
 }

@@ -335,9 +335,9 @@ func (s *Server) handlePublicInvoices(w http.ResponseWriter, r *http.Request) {
 
 	switch parts[1] {
 	case "events":
-		http.Error(w, "not implemented", http.StatusNotImplemented)
+		s.handleListPublicInvoiceEvents(w, r, invoiceID)
 	case "stream":
-		http.Error(w, "not implemented", http.StatusNotImplemented)
+		s.handleStreamPublicInvoiceEvents(w, r, invoiceID)
 	default:
 		http.NotFound(w, r)
 	}
@@ -349,37 +349,11 @@ func (s *Server) handleGetPublicInvoice(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	token := strings.TrimSpace(r.URL.Query().Get("token"))
-	if token == "" {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "invalid token")
-		return
-	}
-
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	inv, ok, err := s.st.GetInvoice(ctx, invoiceID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", "db error")
-		return
-	}
+	inv, ok := s.authorizeInvoiceToken(w, ctx, r, invoiceID)
 	if !ok {
-		writeError(w, http.StatusNotFound, "not_found", "invoice not found")
-		return
-	}
-
-	wantToken, ok, err := s.st.GetInvoiceToken(ctx, invoiceID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", "db error")
-		return
-	}
-	if !ok {
-		writeError(w, http.StatusNotFound, "not_found", "invoice not found")
-		return
-	}
-
-	if subtle.ConstantTimeCompare([]byte(token), []byte(wantToken)) != 1 {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "invalid token")
 		return
 	}
 
@@ -387,6 +361,158 @@ func (s *Server) handleGetPublicInvoice(w http.ResponseWriter, r *http.Request, 
 		"status": "ok",
 		"data":   toInvoiceJSON(inv),
 	})
+}
+
+func (s *Server) handleListPublicInvoiceEvents(w http.ResponseWriter, r *http.Request, invoiceID string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	if _, ok := s.authorizeInvoiceToken(w, ctx, r, invoiceID); !ok {
+		return
+	}
+
+	afterID := int64(0)
+	if v := strings.TrimSpace(r.URL.Query().Get("cursor")); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			writeError(w, http.StatusBadRequest, "invalid_argument", "invalid cursor")
+			return
+		}
+		afterID = n
+	}
+
+	events, nextCursor, err := s.st.ListInvoiceEvents(ctx, invoiceID, afterID, 100)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+
+	out := make([]any, 0, len(events))
+	for _, e := range events {
+		var dep any = nil
+		if e.Deposit != nil {
+			dep = map[string]any{
+				"wallet_id":    e.Deposit.WalletID,
+				"txid":         e.Deposit.TxID,
+				"action_index": e.Deposit.ActionIndex,
+				"amount_zat":   e.Deposit.AmountZat,
+				"height":       e.Deposit.Height,
+			}
+		}
+		out = append(out, map[string]any{
+			"event_id":    e.EventID,
+			"type":        string(e.Type),
+			"occurred_at": e.OccurredAt.UTC().Format(time.RFC3339Nano),
+			"invoice_id":  invoiceID,
+			"deposit":     dep,
+			"refund":      nil,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok",
+		"data": map[string]any{
+			"events":      out,
+			"next_cursor": strconv.FormatInt(nextCursor, 10),
+		},
+	})
+}
+
+func (s *Server) handleStreamPublicInvoiceEvents(w http.ResponseWriter, r *http.Request, invoiceID string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ctx := r.Context()
+	if _, ok := s.authorizeInvoiceToken(w, ctx, r, invoiceID); !ok {
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "internal", "stream unsupported")
+		return
+	}
+
+	afterID := int64(0)
+	if v := strings.TrimSpace(r.URL.Query().Get("cursor")); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err == nil && n >= 0 {
+			afterID = n
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			evs, nextCursor, err := s.st.ListInvoiceEvents(ctx, invoiceID, afterID, 100)
+			if err != nil {
+				return
+			}
+			if len(evs) == 0 {
+				continue
+			}
+			for _, e := range evs {
+				msg, _ := json.Marshal(e)
+				_, _ = w.Write([]byte("id: " + e.EventID + "\n"))
+				_, _ = w.Write([]byte("event: invoice_event\n"))
+				_, _ = w.Write([]byte("data: " + string(msg) + "\n\n"))
+				flusher.Flush()
+			}
+			afterID = nextCursor
+		}
+	}
+}
+
+func (s *Server) authorizeInvoiceToken(w http.ResponseWriter, ctx context.Context, r *http.Request, invoiceID string) (domain.Invoice, bool) {
+	token := strings.TrimSpace(r.URL.Query().Get("token"))
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "invalid token")
+		return domain.Invoice{}, false
+	}
+
+	inv, ok, err := s.st.GetInvoice(ctx, invoiceID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return domain.Invoice{}, false
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "invoice not found")
+		return domain.Invoice{}, false
+	}
+
+	wantToken, ok, err := s.st.GetInvoiceToken(ctx, invoiceID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return domain.Invoice{}, false
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "invoice not found")
+		return domain.Invoice{}, false
+	}
+
+	if subtle.ConstantTimeCompare([]byte(token), []byte(wantToken)) != 1 {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "invalid token")
+		return domain.Invoice{}, false
+	}
+	return inv, true
 }
 
 func (s *Server) authMerchant(ctx context.Context, r *http.Request) (merchantID string, ok bool, err error) {

@@ -8,10 +8,12 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 
 	"github.com/Abdullah1738/juno-pay-server/internal/domain"
 	"github.com/Abdullah1738/juno-pay-server/internal/store"
+	"github.com/Abdullah1738/juno-sdk-go/types"
 )
 
 type Store struct {
@@ -135,6 +138,40 @@ func (s *Store) Init(ctx context.Context) error {
 			invoice_id TEXT PRIMARY KEY,
 			token_enc BLOB NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS scan_cursors (
+			wallet_id TEXT PRIMARY KEY,
+			cursor INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS deposits (
+			wallet_id TEXT NOT NULL,
+			txid TEXT NOT NULL,
+			action_index INTEGER NOT NULL,
+			recipient_address TEXT NOT NULL,
+			amount_zat INTEGER NOT NULL,
+			height INTEGER NOT NULL,
+			status TEXT NOT NULL,
+			confirmed_height INTEGER,
+			invoice_id TEXT,
+			detected_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY (wallet_id, txid, action_index)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_deposits_invoice_status ON deposits(invoice_id, status)`,
+		`CREATE TABLE IF NOT EXISTS invoice_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			invoice_id TEXT NOT NULL,
+			type TEXT NOT NULL,
+			occurred_at INTEGER NOT NULL,
+			deposit_wallet_id TEXT,
+			deposit_txid TEXT,
+			deposit_action_index INTEGER,
+			deposit_amount_zat INTEGER,
+			deposit_height INTEGER,
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_invoice_events_invoice_id ON invoice_events(invoice_id, id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_invoice_events_deposit_unique
+		 ON invoice_events(invoice_id, type, deposit_wallet_id, deposit_txid, deposit_action_index)`,
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -432,6 +469,33 @@ func (s *Store) GetMerchantWallet(ctx context.Context, merchantID string) (store
 	return w, true, nil
 }
 
+func (s *Store) ListMerchantWallets(ctx context.Context) ([]store.MerchantWallet, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT merchant_id, wallet_id, ufvk, chain, ua_hrp, coin_type, created_at
+		FROM merchant_wallets
+		ORDER BY merchant_id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []store.MerchantWallet
+	for rows.Next() {
+		var w store.MerchantWallet
+		var createdAtUnix int64
+		if err := rows.Scan(&w.MerchantID, &w.WalletID, &w.UFVK, &w.Chain, &w.UAHRP, &w.CoinType, &createdAtUnix); err != nil {
+			return nil, err
+		}
+		w.CreatedAt = time.Unix(createdAtUnix, 0).UTC()
+		out = append(out, w)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (s *Store) NextAddressIndex(ctx context.Context, merchantID string) (uint32, error) {
 	merchantID = strings.TrimSpace(merchantID)
 	if merchantID == "" {
@@ -616,6 +680,9 @@ func (s *Store) CreateInvoice(ctx context.Context, req store.InvoiceCreate) (dom
 		nowUnix, nowUnix,
 	)
 	if err == nil {
+		if err := s.insertInvoiceEventTx(ctx, tx, id, domain.InvoiceEventInvoiceCreated, now, nil); err != nil {
+			return domain.Invoice{}, false, err
+		}
 		if err := tx.Commit(); err != nil {
 			return domain.Invoice{}, false, err
 		}
@@ -772,6 +839,137 @@ func (s *Store) GetInvoiceToken(ctx context.Context, invoiceID string) (token st
 	return tok, true, nil
 }
 
+func (s *Store) ScanCursor(ctx context.Context, walletID string) (cursor int64, err error) {
+	walletID = strings.TrimSpace(walletID)
+	if walletID == "" {
+		return 0, domain.NewError(domain.ErrInvalidArgument, "wallet_id is required")
+	}
+	err = s.db.QueryRowContext(ctx, `SELECT cursor FROM scan_cursors WHERE wallet_id = ?`, walletID).Scan(&cursor)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return cursor, nil
+}
+
+func (s *Store) ApplyScanEvent(ctx context.Context, ev store.ScanEvent) error {
+	ev.WalletID = strings.TrimSpace(ev.WalletID)
+	ev.Kind = strings.TrimSpace(ev.Kind)
+	if ev.WalletID == "" {
+		return domain.NewError(domain.ErrInvalidArgument, "wallet_id is required")
+	}
+	if ev.Cursor <= 0 {
+		return domain.NewError(domain.ErrInvalidArgument, "cursor must be > 0")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var cur int64
+	err = tx.QueryRowContext(ctx, `SELECT cursor FROM scan_cursors WHERE wallet_id = ?`, ev.WalletID).Scan(&cur)
+	if errors.Is(err, sql.ErrNoRows) {
+		cur = 0
+		err = nil
+	}
+	if err != nil {
+		return err
+	}
+	if ev.Cursor <= cur {
+		return nil
+	}
+
+	switch types.WalletEventKind(ev.Kind) {
+	case types.WalletEventKindDepositEvent,
+		types.WalletEventKindDepositConfirmed,
+		types.WalletEventKindDepositUnconfirmed,
+		types.WalletEventKindDepositOrphaned:
+		if err := s.applyDepositEventTx(ctx, tx, ev); err != nil {
+			return err
+		}
+	default:
+		// Ignore other event kinds.
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO scan_cursors (wallet_id, cursor)
+		VALUES (?, ?)
+		ON CONFLICT(wallet_id) DO UPDATE SET cursor = excluded.cursor
+		WHERE excluded.cursor > cursor
+	`, ev.WalletID, ev.Cursor); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func (s *Store) ListInvoiceEvents(ctx context.Context, invoiceID string, afterID int64, limit int) (events []domain.InvoiceEvent, nextCursor int64, err error) {
+	invoiceID = strings.TrimSpace(invoiceID)
+	if invoiceID == "" {
+		return nil, 0, domain.NewError(domain.ErrInvalidArgument, "invoice_id is required")
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, type, occurred_at,
+		       deposit_wallet_id, deposit_txid, deposit_action_index, deposit_amount_zat, deposit_height
+		FROM invoice_events
+		WHERE invoice_id = ? AND id > ?
+		ORDER BY id
+		LIMIT ?
+	`, invoiceID, afterID, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			id             int64
+			typ            string
+			occurredAtUnix int64
+			depWalletID    sql.NullString
+			depTxID        sql.NullString
+			depActionIndex sql.NullInt64
+			depAmountZat   sql.NullInt64
+			depHeight      sql.NullInt64
+		)
+		if err := rows.Scan(&id, &typ, &occurredAtUnix, &depWalletID, &depTxID, &depActionIndex, &depAmountZat, &depHeight); err != nil {
+			return nil, 0, err
+		}
+
+		var dep *domain.DepositRef
+		if depTxID.Valid {
+			dep = &domain.DepositRef{
+				WalletID:    depWalletID.String,
+				TxID:        depTxID.String,
+				ActionIndex: int32(depActionIndex.Int64),
+				AmountZat:   depAmountZat.Int64,
+				Height:      depHeight.Int64,
+			}
+		}
+
+		events = append(events, domain.InvoiceEvent{
+			EventID:    strconv.FormatInt(id, 10),
+			Type:       domain.InvoiceEventType(typ),
+			OccurredAt: time.Unix(occurredAtUnix, 0).UTC(),
+			InvoiceID:  invoiceID,
+			Deposit:    dep,
+		})
+		nextCursor = id
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return events, nextCursor, nil
+}
+
 func (s *Store) findInvoiceTx(ctx context.Context, tx *sql.Tx, merchantID, externalOrderID string) (domain.Invoice, bool, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT invoice_id, merchant_id, external_order_id, wallet_id, address_index, address, created_after_height, created_after_hash,
@@ -861,6 +1059,281 @@ func scanInvoiceFull(rows *sql.Rows) (domain.Invoice, error) {
 		CreatedAt:            time.Unix(createdAtUnix, 0).UTC(),
 		UpdatedAt:            time.Unix(updatedAtUnix, 0).UTC(),
 	}, nil
+}
+
+func (s *Store) insertInvoiceEventTx(ctx context.Context, tx *sql.Tx, invoiceID string, typ domain.InvoiceEventType, occurredAt time.Time, dep *domain.DepositRef) error {
+	if dep == nil {
+		var exists int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT 1
+			FROM invoice_events
+			WHERE invoice_id = ? AND type = ? AND deposit_txid IS NULL
+			LIMIT 1
+		`, invoiceID, string(typ)).Scan(&exists); err == nil {
+			return nil
+		}
+	}
+
+	nowUnix := time.Now().UTC().Unix()
+	occurredUnix := occurredAt.UTC().Unix()
+
+	var depWalletID any = nil
+	var depTxID any = nil
+	var depActionIndex any = nil
+	var depAmountZat any = nil
+	var depHeight any = nil
+	if dep != nil {
+		depWalletID = dep.WalletID
+		depTxID = dep.TxID
+		depActionIndex = dep.ActionIndex
+		depAmountZat = dep.AmountZat
+		depHeight = dep.Height
+	}
+
+	_, err := tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO invoice_events (
+			invoice_id, type, occurred_at,
+			deposit_wallet_id, deposit_txid, deposit_action_index, deposit_amount_zat, deposit_height,
+			created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		invoiceID, string(typ), occurredUnix,
+		depWalletID, depTxID, depActionIndex, depAmountZat, depHeight,
+		nowUnix,
+	)
+	return err
+}
+
+func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.ScanEvent) error {
+	now := time.Now().UTC()
+
+	var (
+		walletID         string
+		txid             string
+		actionIndex      int32
+		recipientAddress string
+		amountZat        int64
+		height           int64
+		status           string
+		confirmedHeight  *int64
+	)
+
+	switch types.WalletEventKind(ev.Kind) {
+	case types.WalletEventKindDepositEvent:
+		var p types.DepositEventPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		walletID = p.WalletID
+		txid = p.TxID
+		actionIndex = int32(p.ActionIndex)
+		recipientAddress = p.RecipientAddress
+		amountZat = int64(p.AmountZatoshis)
+		height = p.Height
+		status = "detected"
+	case types.WalletEventKindDepositConfirmed:
+		var p types.DepositConfirmedPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		walletID = p.WalletID
+		txid = p.TxID
+		actionIndex = int32(p.ActionIndex)
+		recipientAddress = p.RecipientAddress
+		amountZat = int64(p.AmountZatoshis)
+		height = p.Height
+		status = "confirmed"
+		ch := p.ConfirmedHeight
+		confirmedHeight = &ch
+	case types.WalletEventKindDepositUnconfirmed:
+		var p types.DepositUnconfirmedPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		walletID = p.WalletID
+		txid = p.TxID
+		actionIndex = int32(p.ActionIndex)
+		recipientAddress = p.RecipientAddress
+		amountZat = int64(p.AmountZatoshis)
+		height = p.Height
+		status = "unconfirmed"
+	case types.WalletEventKindDepositOrphaned:
+		var p types.DepositOrphanedPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			return err
+		}
+		walletID = p.WalletID
+		txid = p.TxID
+		actionIndex = int32(p.ActionIndex)
+		recipientAddress = p.RecipientAddress
+		amountZat = int64(p.AmountZatoshis)
+		height = p.Height
+		status = "orphaned"
+	default:
+		return nil
+	}
+
+	addr := strings.ToLower(strings.TrimSpace(recipientAddress))
+
+	// Find invoice by address (if any).
+	var invoiceID sql.NullString
+	var invoiceCreatedAfterHeight int64
+	err := tx.QueryRowContext(ctx, `
+		SELECT invoice_id, created_after_height
+		FROM invoices
+		WHERE wallet_id = ? AND address = ?
+		LIMIT 1
+	`, walletID, addr).Scan(&invoiceID, &invoiceCreatedAfterHeight)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	applyInvoiceID := ""
+	if err == nil && invoiceID.Valid && height > invoiceCreatedAfterHeight {
+		applyInvoiceID = invoiceID.String
+	}
+
+	detectedAtUnix := ev.OccurredAt.UTC().Unix()
+	if ev.OccurredAt.IsZero() {
+		detectedAtUnix = now.Unix()
+	}
+	updatedAtUnix := now.Unix()
+
+	var confirmedHeightAny any = nil
+	if confirmedHeight != nil {
+		confirmedHeightAny = *confirmedHeight
+	}
+	var invoiceIDAny any = nil
+	if applyInvoiceID != "" {
+		invoiceIDAny = applyInvoiceID
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO deposits (
+			wallet_id, txid, action_index,
+			recipient_address, amount_zat, height,
+			status, confirmed_height, invoice_id,
+			detected_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(wallet_id, txid, action_index) DO UPDATE SET
+			recipient_address = excluded.recipient_address,
+			amount_zat = excluded.amount_zat,
+			height = excluded.height,
+			status = excluded.status,
+			confirmed_height = excluded.confirmed_height,
+			invoice_id = COALESCE(deposits.invoice_id, excluded.invoice_id),
+			updated_at = excluded.updated_at
+	`, walletID, txid, actionIndex, addr, amountZat, height, status, confirmedHeightAny, invoiceIDAny, detectedAtUnix, updatedAtUnix)
+	if err != nil {
+		return err
+	}
+
+	if applyInvoiceID == "" {
+		return nil
+	}
+
+	depRef := &domain.DepositRef{
+		WalletID:    walletID,
+		TxID:        txid,
+		ActionIndex: actionIndex,
+		AmountZat:   amountZat,
+		Height:      height,
+	}
+
+	switch status {
+	case "detected":
+		if err := s.insertInvoiceEventTx(ctx, tx, applyInvoiceID, domain.InvoiceEventDepositDetected, ev.OccurredAt.UTC(), depRef); err != nil {
+			return err
+		}
+	case "confirmed":
+		if err := s.insertInvoiceEventTx(ctx, tx, applyInvoiceID, domain.InvoiceEventDepositConfirmed, ev.OccurredAt.UTC(), depRef); err != nil {
+			return err
+		}
+	}
+
+	// Recompute invoice aggregates.
+	var pendingSum int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(amount_zat), 0)
+		FROM deposits
+		WHERE invoice_id = ? AND status IN ('detected','unconfirmed')
+	`, applyInvoiceID).Scan(&pendingSum); err != nil {
+		return err
+	}
+	var confirmedSum int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(amount_zat), 0)
+		FROM deposits
+		WHERE invoice_id = ? AND status = 'confirmed'
+	`, applyInvoiceID).Scan(&confirmedSum); err != nil {
+		return err
+	}
+
+	var (
+		invAmount     int64
+		invStatus     string
+		invExpires    sql.NullInt64
+		invLatePolicy string
+	)
+	if err := tx.QueryRowContext(ctx, `
+		SELECT amount_zat, status, expires_at, policy_late_payment
+		FROM invoices
+		WHERE invoice_id = ?
+	`, applyInvoiceID).Scan(&invAmount, &invStatus, &invExpires, &invLatePolicy); err != nil {
+		return err
+	}
+
+	expired := invExpires.Valid && now.Unix() > invExpires.Int64
+	newStatus := computeInvoiceStatusSQL(invAmount, confirmedSum, expired, domain.LatePaymentPolicy(invLatePolicy))
+
+	_, err = tx.ExecContext(ctx, `
+		UPDATE invoices
+		SET received_pending_zat = ?,
+		    received_confirmed_zat = ?,
+		    status = ?,
+		    updated_at = ?
+		WHERE invoice_id = ?
+	`, pendingSum, confirmedSum, string(newStatus), updatedAtUnix, applyInvoiceID)
+	if err != nil {
+		return err
+	}
+
+	if newStatus != domain.InvoiceStatus(invStatus) {
+		switch newStatus {
+		case domain.InvoiceExpired:
+			if err := s.insertInvoiceEventTx(ctx, tx, applyInvoiceID, domain.InvoiceEventInvoiceExpired, now, nil); err != nil {
+				return err
+			}
+		case domain.InvoicePaid, domain.InvoicePaidLate:
+			if err := s.insertInvoiceEventTx(ctx, tx, applyInvoiceID, domain.InvoiceEventInvoicePaid, now, nil); err != nil {
+				return err
+			}
+		case domain.InvoiceOverpaid:
+			if err := s.insertInvoiceEventTx(ctx, tx, applyInvoiceID, domain.InvoiceEventInvoiceOverpaid, now, nil); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func computeInvoiceStatusSQL(amountZat int64, confirmedZat int64, expired bool, latePolicy domain.LatePaymentPolicy) domain.InvoiceStatus {
+	switch {
+	case confirmedZat == 0 && expired:
+		return domain.InvoiceExpired
+	case confirmedZat == 0:
+		return domain.InvoiceOpen
+	case confirmedZat < amountZat:
+		return domain.InvoicePartial
+	case confirmedZat == amountZat:
+		if expired && latePolicy == domain.LatePaymentMarkPaidLate {
+			return domain.InvoicePaidLate
+		}
+		return domain.InvoicePaid
+	default:
+		return domain.InvoiceOverpaid
+	}
 }
 
 func (s *Store) encryptToken(invoiceID string, token string) ([]byte, error) {

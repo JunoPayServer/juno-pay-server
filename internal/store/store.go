@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -42,6 +43,15 @@ type InvoiceCreate struct {
 	ExpiresAt             *time.Time
 }
 
+type ScanEvent struct {
+	WalletID   string
+	Cursor     int64
+	Kind       string
+	Height     int64
+	Payload    json.RawMessage
+	OccurredAt time.Time
+}
+
 type Store interface {
 	// Merchants
 	CreateMerchant(ctx context.Context, name string, settings domain.MerchantSettings) (domain.Merchant, error)
@@ -52,6 +62,7 @@ type Store interface {
 	// Wallets (one UFVK per merchant; immutable)
 	SetMerchantWallet(ctx context.Context, merchantID string, w MerchantWallet) (MerchantWallet, error)
 	GetMerchantWallet(ctx context.Context, merchantID string) (MerchantWallet, bool, error)
+	ListMerchantWallets(ctx context.Context) ([]MerchantWallet, error)
 	NextAddressIndex(ctx context.Context, merchantID string) (uint32, error)
 
 	// Merchant API keys (for invoice creation only)
@@ -67,4 +78,11 @@ type Store interface {
 	// Invoice checkout token (stored encrypted-at-rest in production DB).
 	PutInvoiceToken(ctx context.Context, invoiceID string, token string) error
 	GetInvoiceToken(ctx context.Context, invoiceID string) (token string, ok bool, err error)
+
+	// Scan ingestion + invoice accounting.
+	ScanCursor(ctx context.Context, walletID string) (cursor int64, err error)
+	ApplyScanEvent(ctx context.Context, ev ScanEvent) error
+
+	// Invoice events (for polling and SSE).
+	ListInvoiceEvents(ctx context.Context, invoiceID string, afterID int64, limit int) (events []domain.InvoiceEvent, nextCursor int64, err error)
 }
