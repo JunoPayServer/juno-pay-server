@@ -8,11 +8,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/Abdullah1738/juno-pay-server/internal/api"
+	"github.com/Abdullah1738/juno-pay-server/internal/ingest"
 	"github.com/Abdullah1738/juno-pay-server/internal/keys"
 	"github.com/Abdullah1738/juno-pay-server/internal/keys/ffi"
+	"github.com/Abdullah1738/juno-pay-server/internal/scanclient"
 	"github.com/Abdullah1738/juno-pay-server/internal/store/sqlite"
 	"github.com/Abdullah1738/juno-sdk-go/junocashd"
 )
@@ -56,6 +59,28 @@ func main() {
 		log.Fatalf("init error: %v", err)
 	}
 
+	scanURL := getenv("JUNO_SCAN_URL", "")
+	if scanURL == "" {
+		log.Fatalf("missing env: JUNO_SCAN_URL")
+	}
+	sc, err := scanclient.New(scanURL)
+	if err != nil {
+		log.Fatalf("init scan client: %v", err)
+	}
+	pollInterval := parsePollInterval(getenv("JUNO_PAY_SCAN_POLL_MS", "1000"))
+	ing, err := ingest.New(st, sc, pollInterval)
+	if err != nil {
+		log.Fatalf("init ingestor: %v", err)
+	}
+	go func() {
+		for {
+			if err := ing.Sync(context.Background()); err != nil {
+				log.Printf("scan sync error: %v", err)
+			}
+			time.Sleep(pollInterval)
+		}
+	}()
+
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           s.Handler(),
@@ -80,6 +105,20 @@ func defaultDataDir() string {
 		return filepath.Join(home, ".juno-pay-server")
 	}
 	return ".juno-pay-server"
+}
+
+func parsePollInterval(ms string) time.Duration {
+	n, err := strconv.Atoi(ms)
+	if err != nil || n <= 0 {
+		return time.Second
+	}
+	if n < 100 {
+		n = 100
+	}
+	if n > 60000 {
+		n = 60000
+	}
+	return time.Duration(n) * time.Millisecond
 }
 
 type keysDeriver struct{ d keys.Deriver }
