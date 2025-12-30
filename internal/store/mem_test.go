@@ -427,3 +427,124 @@ func TestMemStore_ListInvoices_FilterAndCursor(t *testing.T) {
 		t.Fatalf("expected only i1 for external_order_id")
 	}
 }
+
+func TestMemStore_ListDeposits_FilterAndCursor(t *testing.T) {
+	st := NewMem()
+	ctx := context.Background()
+
+	m, err := st.CreateMerchant(ctx, "acme", domain.MerchantSettings{
+		InvoiceTTLSeconds:     0,
+		RequiredConfirmations: 0,
+		Policies: domain.InvoicePolicies{
+			LatePayment:    domain.LatePaymentMarkPaidLate,
+			PartialPayment: domain.PartialPaymentAccept,
+			Overpayment:    domain.OverpaymentMarkOverpaid,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateMerchant: %v", err)
+	}
+	if _, err := st.SetMerchantWallet(ctx, m.MerchantID, MerchantWallet{
+		WalletID: "w1",
+		UFVK:     "jview1test",
+		Chain:    "mainnet",
+		UAHRP:    "j",
+		CoinType: 8133,
+	}); err != nil {
+		t.Fatalf("SetMerchantWallet: %v", err)
+	}
+
+	inv, _, err := st.CreateInvoice(ctx, InvoiceCreate{
+		MerchantID:            m.MerchantID,
+		ExternalOrderID:       "order-1",
+		WalletID:              "w1",
+		AddressIndex:          0,
+		Address:               "j1a",
+		CreatedAfterHeight:    0,
+		CreatedAfterHash:      "h0",
+		AmountZat:             10,
+		RequiredConfirmations: 0,
+		Policies: domain.InvoicePolicies{
+			LatePayment:    domain.LatePaymentMarkPaidLate,
+			PartialPayment: domain.PartialPaymentAccept,
+			Overpayment:    domain.OverpaymentMarkOverpaid,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateInvoice: %v", err)
+	}
+
+	// Deposit 1 matches invoice.
+	p1 := types.DepositEventPayload{
+		DepositEvent: types.DepositEvent{
+			WalletID:       "w1",
+			TxID:           "tx1",
+			Height:         1,
+			ActionIndex:    0,
+			AmountZatoshis: 10,
+		},
+		RecipientAddress: "j1a",
+	}
+	b1, _ := json.Marshal(p1)
+	if err := st.ApplyScanEvent(ctx, ScanEvent{
+		WalletID:   "w1",
+		Cursor:     1,
+		Kind:       string(types.WalletEventKindDepositEvent),
+		Payload:    b1,
+		OccurredAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("ApplyScanEvent 1: %v", err)
+	}
+
+	// Deposit 2 is an unknown address (no invoice mapping).
+	p2 := types.DepositEventPayload{
+		DepositEvent: types.DepositEvent{
+			WalletID:       "w1",
+			TxID:           "tx2",
+			Height:         2,
+			ActionIndex:    0,
+			AmountZatoshis: 1,
+		},
+		RecipientAddress: "j1unknown",
+	}
+	b2, _ := json.Marshal(p2)
+	if err := st.ApplyScanEvent(ctx, ScanEvent{
+		WalletID:   "w1",
+		Cursor:     2,
+		Kind:       string(types.WalletEventKindDepositEvent),
+		Payload:    b2,
+		OccurredAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("ApplyScanEvent 2: %v", err)
+	}
+
+	page1, cur1, err := st.ListDeposits(ctx, DepositFilter{MerchantID: m.MerchantID, AfterID: 0, Limit: 1})
+	if err != nil {
+		t.Fatalf("ListDeposits page1: %v", err)
+	}
+	if len(page1) != 1 || page1[0].TxID != "tx1" {
+		t.Fatalf("expected first deposit tx1")
+	}
+	if page1[0].InvoiceID == nil || *page1[0].InvoiceID != inv.InvoiceID {
+		t.Fatalf("expected tx1 invoice_id to match invoice")
+	}
+
+	page2, _, err := st.ListDeposits(ctx, DepositFilter{MerchantID: m.MerchantID, AfterID: cur1, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListDeposits page2: %v", err)
+	}
+	if len(page2) != 1 || page2[0].TxID != "tx2" {
+		t.Fatalf("expected second deposit tx2")
+	}
+	if page2[0].InvoiceID != nil {
+		t.Fatalf("expected tx2 invoice_id to be nil")
+	}
+
+	onlyInv, _, err := st.ListDeposits(ctx, DepositFilter{MerchantID: m.MerchantID, InvoiceID: inv.InvoiceID, AfterID: 0, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListDeposits onlyInv: %v", err)
+	}
+	if len(onlyInv) != 1 || onlyInv[0].TxID != "tx1" {
+		t.Fatalf("expected only tx1 for invoice_id filter")
+	}
+}

@@ -52,6 +52,15 @@ type InvoiceFilter struct {
 	Limit   int
 }
 
+type DepositFilter struct {
+	MerchantID string
+	InvoiceID  string
+	TxID       string
+
+	AfterID int64
+	Limit   int
+}
+
 type ScanEvent struct {
 	WalletID   string
 	Cursor     int64
@@ -114,6 +123,9 @@ type Store interface {
 
 	// Invoice events (for polling and SSE).
 	ListInvoiceEvents(ctx context.Context, invoiceID string, afterID int64, limit int) (events []domain.InvoiceEvent, nextCursor int64, err error)
+
+	// Deposits (debug/admin).
+	ListDeposits(ctx context.Context, f DepositFilter) (deposits []domain.Deposit, nextCursor int64, err error)
 
 	// Outbound events (webhook/brokers) + sinks.
 	CreateEventSink(ctx context.Context, req EventSinkCreate) (domain.EventSink, error)

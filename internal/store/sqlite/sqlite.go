@@ -1124,6 +1124,108 @@ func (s *Store) ListInvoiceEvents(ctx context.Context, invoiceID string, afterID
 	return events, nextCursor, nil
 }
 
+func (s *Store) ListDeposits(ctx context.Context, f store.DepositFilter) (deposits []domain.Deposit, nextCursor int64, err error) {
+	f.MerchantID = strings.TrimSpace(f.MerchantID)
+	f.InvoiceID = strings.TrimSpace(f.InvoiceID)
+	f.TxID = strings.TrimSpace(f.TxID)
+	if f.AfterID < 0 {
+		f.AfterID = 0
+	}
+	if f.Limit <= 0 || f.Limit > 1000 {
+		f.Limit = 100
+	}
+
+	base := `
+		SELECT d.rowid,
+		       d.wallet_id, d.txid, d.action_index, d.recipient_address, d.amount_zat, d.height,
+		       d.status, d.confirmed_height, d.invoice_id,
+		       d.detected_at, d.updated_at
+		FROM deposits d
+	`
+
+	where := []string{"d.rowid > ?"}
+	args := []any{f.AfterID}
+
+	if f.MerchantID != "" {
+		base += ` JOIN merchant_wallets mw ON mw.wallet_id = d.wallet_id `
+		where = append(where, "mw.merchant_id = ?")
+		args = append(args, f.MerchantID)
+	}
+	if f.InvoiceID != "" {
+		where = append(where, "d.invoice_id = ?")
+		args = append(args, f.InvoiceID)
+	}
+	if f.TxID != "" {
+		where = append(where, "d.txid = ?")
+		args = append(args, f.TxID)
+	}
+
+	args = append(args, f.Limit)
+	q := base + `
+		WHERE ` + strings.Join(where, " AND ") + `
+		ORDER BY d.rowid
+		LIMIT ?
+	`
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	out := make([]domain.Deposit, 0, f.Limit)
+	var next int64
+	for rows.Next() {
+		var (
+			seq         int64
+			walletID    string
+			txid        string
+			actionIndex int32
+			addr        string
+			amountZat   int64
+			height      int64
+			status      string
+			confHeight  sql.NullInt64
+			invoiceID   sql.NullString
+			detectedAt  int64
+			updatedAt   int64
+		)
+		if err := rows.Scan(&seq, &walletID, &txid, &actionIndex, &addr, &amountZat, &height, &status, &confHeight, &invoiceID, &detectedAt, &updatedAt); err != nil {
+			return nil, 0, err
+		}
+
+		var confirmedHeight *int64
+		if confHeight.Valid {
+			v := confHeight.Int64
+			confirmedHeight = &v
+		}
+		var invID *string
+		if invoiceID.Valid && strings.TrimSpace(invoiceID.String) != "" {
+			v := invoiceID.String
+			invID = &v
+		}
+
+		out = append(out, domain.Deposit{
+			WalletID:         walletID,
+			TxID:             txid,
+			ActionIndex:      actionIndex,
+			RecipientAddress: addr,
+			AmountZat:        amountZat,
+			Height:           height,
+			Status:           domain.DepositStatus(status),
+			ConfirmedHeight:  confirmedHeight,
+			InvoiceID:        invID,
+			DetectedAt:       time.Unix(detectedAt, 0).UTC(),
+			UpdatedAt:        time.Unix(updatedAt, 0).UTC(),
+		})
+		next = seq
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return out, next, nil
+}
+
 func (s *Store) CreateEventSink(ctx context.Context, req store.EventSinkCreate) (domain.EventSink, error) {
 	req.MerchantID = strings.TrimSpace(req.MerchantID)
 	if req.MerchantID == "" {

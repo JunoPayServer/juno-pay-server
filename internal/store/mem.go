@@ -22,6 +22,7 @@ type MemStore struct {
 
 	merchantSeq int64
 	invoiceSeq  int64
+	depositSeq  int64
 	sinkSeq     int64
 	outboxSeq   int64
 	deliverySeq int64
@@ -60,6 +61,7 @@ type apiKeyRecord struct {
 }
 
 type depositRecord struct {
+	Seq              int64
 	WalletID         string
 	TxID             string
 	ActionIndex      int32
@@ -69,6 +71,7 @@ type depositRecord struct {
 	Status           string
 	ConfirmedHeight  *int64
 	InvoiceID        string
+	DetectedAt       time.Time
 	UpdatedAt        time.Time
 }
 
@@ -589,6 +592,85 @@ func (s *MemStore) ListInvoiceEvents(_ context.Context, invoiceID string, afterI
 	return out, nextCursor, nil
 }
 
+func (s *MemStore) ListDeposits(_ context.Context, f DepositFilter) ([]domain.Deposit, int64, error) {
+	f.MerchantID = strings.TrimSpace(f.MerchantID)
+	f.InvoiceID = strings.TrimSpace(f.InvoiceID)
+	f.TxID = strings.TrimSpace(f.TxID)
+	if f.AfterID < 0 {
+		f.AfterID = 0
+	}
+	if f.Limit <= 0 || f.Limit > 1000 {
+		f.Limit = 100
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	walletToMerchant := make(map[string]string, len(s.merchantWallet))
+	for _, w := range s.merchantWallet {
+		walletToMerchant[w.WalletID] = w.MerchantID
+	}
+
+	type rec struct {
+		Seq int64
+		Dep domain.Deposit
+	}
+	recs := make([]rec, 0, len(s.deposits))
+	for _, d := range s.deposits {
+		if f.AfterID > 0 && d.Seq <= f.AfterID {
+			continue
+		}
+		if f.TxID != "" && d.TxID != f.TxID {
+			continue
+		}
+		if f.InvoiceID != "" && d.InvoiceID != f.InvoiceID {
+			continue
+		}
+		if f.MerchantID != "" {
+			mid, ok := walletToMerchant[d.WalletID]
+			if !ok || mid != f.MerchantID {
+				continue
+			}
+		}
+
+		var invoiceID *string
+		if d.InvoiceID != "" {
+			v := d.InvoiceID
+			invoiceID = &v
+		}
+
+		recs = append(recs, rec{
+			Seq: d.Seq,
+			Dep: domain.Deposit{
+				WalletID:         d.WalletID,
+				TxID:             d.TxID,
+				ActionIndex:      d.ActionIndex,
+				RecipientAddress: d.RecipientAddress,
+				AmountZat:        d.AmountZat,
+				Height:           d.Height,
+				Status:           domain.DepositStatus(d.Status),
+				ConfirmedHeight:  d.ConfirmedHeight,
+				InvoiceID:        invoiceID,
+				DetectedAt:       d.DetectedAt,
+				UpdatedAt:        d.UpdatedAt,
+			},
+		})
+	}
+
+	sort.Slice(recs, func(i, j int) bool { return recs[i].Seq < recs[j].Seq })
+
+	out := make([]domain.Deposit, 0, f.Limit)
+	var nextCursor int64
+	for _, r := range recs {
+		out = append(out, r.Dep)
+		nextCursor = r.Seq
+		if len(out) >= f.Limit {
+			break
+		}
+	}
+	return out, nextCursor, nil
+}
+
 func (s *MemStore) applyDepositLocked(ev ScanEvent, walletID, txid string, actionIndex int32, recipientAddress string, amountZatoshis uint64, height int64, status string, confirmedHeight *int64) {
 	if walletID == "" {
 		walletID = ev.WalletID
@@ -596,6 +678,7 @@ func (s *MemStore) applyDepositLocked(ev ScanEvent, walletID, txid string, actio
 	if recipientAddress == "" {
 		return
 	}
+	now := time.Now().UTC()
 
 	maxInt64 := uint64(^uint64(0) >> 1)
 	if amountZatoshis > maxInt64 {
@@ -616,7 +699,13 @@ func (s *MemStore) applyDepositLocked(ev ScanEvent, walletID, txid string, actio
 	depKey := walletID + "|" + txid + "|" + strconv.FormatInt(int64(actionIndex), 10)
 	rec, ok := s.deposits[depKey]
 	if !ok {
+		s.depositSeq++
+		detectedAt := ev.OccurredAt.UTC()
+		if detectedAt.IsZero() {
+			detectedAt = now
+		}
 		rec = depositRecord{
+			Seq:              s.depositSeq,
 			WalletID:         walletID,
 			TxID:             txid,
 			ActionIndex:      actionIndex,
@@ -626,12 +715,13 @@ func (s *MemStore) applyDepositLocked(ev ScanEvent, walletID, txid string, actio
 			Status:           status,
 			ConfirmedHeight:  confirmedHeight,
 			InvoiceID:        invoiceID,
-			UpdatedAt:        time.Now().UTC(),
+			DetectedAt:       detectedAt,
+			UpdatedAt:        now,
 		}
 	} else {
 		rec.Status = status
 		rec.ConfirmedHeight = confirmedHeight
-		rec.UpdatedAt = time.Now().UTC()
+		rec.UpdatedAt = now
 		if rec.InvoiceID == "" && invoiceID != "" {
 			rec.InvoiceID = invoiceID
 		}
