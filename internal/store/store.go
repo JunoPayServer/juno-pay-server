@@ -169,4 +169,8 @@ type Store interface {
 	ListEventDeliveries(ctx context.Context, f EventDeliveryFilter) ([]domain.EventDelivery, error)
 	ListDueDeliveries(ctx context.Context, now time.Time, limit int) ([]DueDelivery, error)
 	UpdateEventDelivery(ctx context.Context, deliveryID string, status domain.EventDeliveryStatus, attempt int32, nextRetryAt *time.Time, lastError *string) error
+
+	// Status snapshot helpers (for /v1/status).
+	ScannerStatus(ctx context.Context) (lastCursor int64, lastEventAt *time.Time, err error)
+	PendingDeliveries(ctx context.Context) (count int64, err error)
 }

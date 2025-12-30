@@ -43,8 +43,9 @@ type MemStore struct {
 	apiKeysByID   map[string]apiKeyRecord
 	apiKeysByHash map[string]string // sha256(token) hex -> key_id
 
-	scanCursor map[string]int64 // wallet_id -> last applied cursor
-	deposits   map[string]depositRecord
+	scanCursor      map[string]int64     // wallet_id -> last applied cursor
+	scanLastEventAt map[string]time.Time // wallet_id -> last applied event time
+	deposits        map[string]depositRecord
 
 	invoiceEventSeq int64
 	invoiceEvents   map[string][]domain.InvoiceEvent // invoice_id -> events
@@ -114,6 +115,7 @@ func NewMem() *MemStore {
 		apiKeysByID:       make(map[string]apiKeyRecord),
 		apiKeysByHash:     make(map[string]string),
 		scanCursor:        make(map[string]int64),
+		scanLastEventAt:   make(map[string]time.Time),
 		deposits:          make(map[string]depositRecord),
 		invoiceEvents:     make(map[string][]domain.InvoiceEvent),
 		reviewCases:       make(map[string]reviewRecord),
@@ -577,7 +579,51 @@ func (s *MemStore) ApplyScanEvent(_ context.Context, ev ScanEvent) error {
 	}
 
 	s.scanCursor[ev.WalletID] = ev.Cursor
+	t := ev.OccurredAt.UTC()
+	if ev.OccurredAt.IsZero() {
+		t = time.Now().UTC()
+	}
+	s.scanLastEventAt[ev.WalletID] = t
 	return nil
+}
+
+func (s *MemStore) ScannerStatus(_ context.Context) (lastCursor int64, lastEventAt *time.Time, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, cur := range s.scanCursor {
+		if cur > lastCursor {
+			lastCursor = cur
+		}
+	}
+
+	var max time.Time
+	for _, t := range s.scanLastEventAt {
+		if t.IsZero() {
+			continue
+		}
+		if max.IsZero() || t.After(max) {
+			max = t
+		}
+	}
+	if max.IsZero() {
+		return lastCursor, nil, nil
+	}
+	mt := max.UTC()
+	return lastCursor, &mt, nil
+}
+
+func (s *MemStore) PendingDeliveries(_ context.Context) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var n int64
+	for _, d := range s.deliveries {
+		if d.Status == domain.EventDeliveryPending {
+			n++
+		}
+	}
+	return n, nil
 }
 
 func (s *MemStore) ListInvoiceEvents(_ context.Context, invoiceID string, afterID int64, limit int) ([]domain.InvoiceEvent, int64, error) {

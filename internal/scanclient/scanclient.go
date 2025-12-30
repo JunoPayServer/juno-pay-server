@@ -36,6 +36,32 @@ func New(baseURL string) (*Client, error) {
 	}, nil
 }
 
+func (c *Client) Healthy(ctx context.Context) (bool, error) {
+	if c == nil || c.baseURL == "" || c.http == nil {
+		return false, errors.New("scanclient: not initialized")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/health", nil)
+	if err != nil {
+		return false, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false, nil
+	}
+	var out struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out.Status) == "ok", nil
+}
+
 type walletUpsertRequest struct {
 	WalletID string `json:"wallet_id"`
 	UFVK     string `json:"ufvk"`

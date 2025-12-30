@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Abdullah1738/juno-pay-server/internal/domain"
@@ -47,6 +48,7 @@ type Deriver interface {
 
 type TipSource interface {
 	BestTip(ctx context.Context) (height int64, hash string, err error)
+	UptimeSeconds(ctx context.Context) (seconds int64, err error)
 }
 
 type Clock interface {
@@ -57,6 +59,10 @@ type TokenGenerator interface {
 	NewInvoiceToken() (string, error)
 }
 
+type ScannerHealth interface {
+	Healthy(ctx context.Context) (bool, error)
+}
+
 type Server struct {
 	st store.Store
 
@@ -65,10 +71,20 @@ type Server struct {
 	clock    Clock
 	tokenGen TokenGenerator
 
+	scanHealth ScannerHealth
+
 	adminEnabled    bool
 	adminPassHash   [32]byte
 	adminSessionKey [32]byte
 	adminSessionTTL time.Duration
+
+	muRestart sync.Mutex
+
+	lastUptimeKnown   bool
+	lastUptimeSeconds int64
+
+	junocashdRestartsDetected int64
+	lastRestartAt             *time.Time
 }
 
 func New(st store.Store, deriver Deriver, tip TipSource, clock Clock, tokenGen TokenGenerator, opts ...Option) (*Server, error) {
@@ -106,6 +122,38 @@ func New(st store.Store, deriver Deriver, tip TipSource, clock Clock, tokenGen T
 	}
 
 	return s, nil
+}
+
+func WithScannerHealth(h ScannerHealth) Option {
+	return func(s *Server) error {
+		s.scanHealth = h
+		return nil
+	}
+}
+
+func (s *Server) observeUptime(now time.Time, uptimeSeconds int64) (restartsDetected int64, lastRestartAt *time.Time) {
+	if s == nil {
+		return 0, nil
+	}
+	now = now.UTC()
+
+	s.muRestart.Lock()
+	defer s.muRestart.Unlock()
+
+	if s.lastUptimeKnown && uptimeSeconds < s.lastUptimeSeconds {
+		s.junocashdRestartsDetected++
+		t := now
+		s.lastRestartAt = &t
+	}
+	s.lastUptimeKnown = true
+	s.lastUptimeSeconds = uptimeSeconds
+
+	var last *time.Time
+	if s.lastRestartAt != nil {
+		t := *s.lastRestartAt
+		last = &t
+	}
+	return s.junocashdRestartsDetected, last
 }
 
 func (s *Server) Handler() http.Handler {
@@ -151,11 +199,62 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// TODO: include scanner sync, backlog, and outbox metrics.
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	bestHeight, bestHash, err := s.tip.BestTip(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "tip error")
+		return
+	}
+	uptimeSeconds, err := s.tip.UptimeSeconds(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "uptime error")
+		return
+	}
+	s.observeUptime(s.clock.Now().UTC(), uptimeSeconds)
+
+	scannerConnected := false
+	if s.scanHealth != nil {
+		ok, err := s.scanHealth.Healthy(ctx)
+		if err == nil && ok {
+			scannerConnected = true
+		}
+	}
+
+	lastCursor, lastEventAt, err := s.st.ScannerStatus(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+	pendingDeliveries, err := s.st.PendingDeliveries(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+
+	var lastEventAtAny any = nil
+	if lastEventAt != nil && !lastEventAt.IsZero() {
+		lastEventAtAny = lastEventAt.UTC().Format(time.RFC3339Nano)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "ok",
 		"data": map[string]any{
-			"ok": true,
+			"chain": map[string]any{
+				"best_height":    bestHeight,
+				"best_hash":      bestHash,
+				"uptime_seconds": uptimeSeconds,
+			},
+			"scanner": map[string]any{
+				"connected":           scannerConnected,
+				"last_cursor_applied": lastCursor,
+				"last_event_at":       lastEventAtAny,
+			},
+			"event_delivery": map[string]any{
+				"pending_deliveries": pendingDeliveries,
+			},
 		},
 	})
 }
@@ -604,11 +703,70 @@ func (s *Server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	// TODO: include scanner sync, restarts/backfill indicators, outbox backlog.
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	bestHeight, bestHash, err := s.tip.BestTip(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "tip error")
+		return
+	}
+	uptimeSeconds, err := s.tip.UptimeSeconds(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "uptime error")
+		return
+	}
+	restartsDetected, lastRestartAt := s.observeUptime(s.clock.Now().UTC(), uptimeSeconds)
+
+	scannerConnected := false
+	if s.scanHealth != nil {
+		ok, err := s.scanHealth.Healthy(ctx)
+		if err == nil && ok {
+			scannerConnected = true
+		}
+	}
+
+	lastCursor, lastEventAt, err := s.st.ScannerStatus(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+	pendingDeliveries, err := s.st.PendingDeliveries(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+
+	var lastEventAtAny any = nil
+	if lastEventAt != nil && !lastEventAt.IsZero() {
+		lastEventAtAny = lastEventAt.UTC().Format(time.RFC3339Nano)
+	}
+	var lastRestartAtAny any = nil
+	if lastRestartAt != nil && !lastRestartAt.IsZero() {
+		lastRestartAtAny = lastRestartAt.UTC().Format(time.RFC3339Nano)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "ok",
 		"data": map[string]any{
-			"ok": true,
+			"chain": map[string]any{
+				"best_height":    bestHeight,
+				"best_hash":      bestHash,
+				"uptime_seconds": uptimeSeconds,
+			},
+			"scanner": map[string]any{
+				"connected":           scannerConnected,
+				"last_cursor_applied": lastCursor,
+				"last_event_at":       lastEventAtAny,
+			},
+			"event_delivery": map[string]any{
+				"pending_deliveries": pendingDeliveries,
+			},
+			"restarts": map[string]any{
+				"junocashd_restarts_detected": restartsDetected,
+				"last_restart_at":             lastRestartAtAny,
+			},
 		},
 	})
 }

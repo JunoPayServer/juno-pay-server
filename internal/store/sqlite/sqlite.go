@@ -140,7 +140,8 @@ func (s *Store) Init(ctx context.Context) error {
 		)`,
 		`CREATE TABLE IF NOT EXISTS scan_cursors (
 			wallet_id TEXT PRIMARY KEY,
-			cursor INTEGER NOT NULL
+			cursor INTEGER NOT NULL,
+			last_event_at INTEGER
 		)`,
 		`CREATE TABLE IF NOT EXISTS deposits (
 			wallet_id TEXT NOT NULL,
@@ -254,7 +255,20 @@ func (s *Store) Init(ctx context.Context) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	// Migrations for older DBs.
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE scan_cursors ADD COLUMN last_event_at INTEGER`); err != nil {
+		// Ignore "duplicate column name" errors.
+		msg := strings.ToLower(err.Error())
+		if !strings.Contains(msg, "duplicate") && !strings.Contains(msg, "already exists") {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (s *Store) CreateMerchant(ctx context.Context, name string, settings domain.MerchantSettings) (domain.Merchant, error) {
@@ -1044,6 +1058,36 @@ func (s *Store) ScanCursor(ctx context.Context, walletID string) (cursor int64, 
 	return cursor, nil
 }
 
+func (s *Store) ScannerStatus(ctx context.Context) (lastCursor int64, lastEventAt *time.Time, err error) {
+	var (
+		maxCursor int64
+		maxEvent  sql.NullInt64
+	)
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(cursor), 0), MAX(last_event_at)
+		FROM scan_cursors
+	`).Scan(&maxCursor, &maxEvent); err != nil {
+		return 0, nil, err
+	}
+	if maxEvent.Valid {
+		t := time.Unix(maxEvent.Int64, 0).UTC()
+		lastEventAt = &t
+	}
+	return maxCursor, lastEventAt, nil
+}
+
+func (s *Store) PendingDeliveries(ctx context.Context) (int64, error) {
+	var n int64
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM event_deliveries
+		WHERE status = ?
+	`, string(domain.EventDeliveryPending)).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 func (s *Store) ApplyScanEvent(ctx context.Context, ev store.ScanEvent) error {
 	ev.WalletID = strings.TrimSpace(ev.WalletID)
 	ev.Kind = strings.TrimSpace(ev.Kind)
@@ -1085,12 +1129,18 @@ func (s *Store) ApplyScanEvent(ctx context.Context, ev store.ScanEvent) error {
 		// Ignore other event kinds.
 	}
 
+	lastEventAt := ev.OccurredAt.UTC()
+	if ev.OccurredAt.IsZero() {
+		lastEventAt = time.Now().UTC()
+	}
+	lastEventAtUnix := lastEventAt.Unix()
+
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO scan_cursors (wallet_id, cursor)
-		VALUES (?, ?)
-		ON CONFLICT(wallet_id) DO UPDATE SET cursor = excluded.cursor
+		INSERT INTO scan_cursors (wallet_id, cursor, last_event_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(wallet_id) DO UPDATE SET cursor = excluded.cursor, last_event_at = excluded.last_event_at
 		WHERE excluded.cursor > cursor
-	`, ev.WalletID, ev.Cursor); err != nil {
+	`, ev.WalletID, ev.Cursor, lastEventAtUnix); err != nil {
 		return err
 	}
 

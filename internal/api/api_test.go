@@ -20,9 +20,11 @@ func (c fixedClock) Now() time.Time { return c.t }
 type fixedTip struct {
 	height int64
 	hash   string
+	uptime int64
 }
 
 func (t fixedTip) BestTip(_ context.Context) (int64, string, error) { return t.height, t.hash, nil }
+func (t fixedTip) UptimeSeconds(_ context.Context) (int64, error)   { return t.uptime, nil }
 
 type fakeDeriver struct{}
 

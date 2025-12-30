@@ -56,11 +56,6 @@ func main() {
 	rpcPass := getenv("JUNO_CASHD_RPC_PASS", "")
 	jcd := junocashd.New(rpcURL, rpcUser, rpcPass)
 
-	s, err := api.New(st, keysDeriver{d: ffi.New()}, junocashdTip{cli: jcd}, realClock{}, randTokenGen{}, api.WithAdminPassword(adminPassword))
-	if err != nil {
-		log.Fatalf("init error: %v", err)
-	}
-
 	scanURL := getenv("JUNO_SCAN_URL", "")
 	if scanURL == "" {
 		log.Fatalf("missing env: JUNO_SCAN_URL")
@@ -68,6 +63,19 @@ func main() {
 	sc, err := scanclient.New(scanURL)
 	if err != nil {
 		log.Fatalf("init scan client: %v", err)
+	}
+
+	s, err := api.New(
+		st,
+		keysDeriver{d: ffi.New()},
+		junocashdTip{cli: jcd},
+		realClock{},
+		randTokenGen{},
+		api.WithAdminPassword(adminPassword),
+		api.WithScannerHealth(sc),
+	)
+	if err != nil {
+		log.Fatalf("init error: %v", err)
 	}
 	pollInterval := parsePollInterval(getenv("JUNO_PAY_SCAN_POLL_MS", "1000"))
 	ing, err := ingest.New(st, sc, pollInterval)
@@ -174,6 +182,20 @@ func (t junocashdTip) BestTip(ctx context.Context) (int64, string, error) {
 		return 0, "", err
 	}
 	return height, hash, nil
+}
+
+func (t junocashdTip) UptimeSeconds(ctx context.Context) (int64, error) {
+	if t.cli == nil {
+		return 0, nil
+	}
+	var out int64
+	if err := t.cli.Call(ctx, "uptime", nil, &out); err != nil {
+		return 0, err
+	}
+	if out < 0 {
+		out = 0
+	}
+	return out, nil
 }
 
 type realClock struct{}
