@@ -127,6 +127,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/admin/invoices", s.handleAdminInvoices)
 	mux.HandleFunc("/v1/admin/invoices/", s.handleAdminInvoiceSubroutes)
 	mux.HandleFunc("/v1/admin/deposits", s.handleAdminDeposits)
+	mux.HandleFunc("/v1/admin/refunds", s.handleAdminRefunds)
 	return mux
 }
 
@@ -403,24 +404,7 @@ func (s *Server) handleListPublicInvoiceEvents(w http.ResponseWriter, r *http.Re
 
 	out := make([]any, 0, len(events))
 	for _, e := range events {
-		var dep any = nil
-		if e.Deposit != nil {
-			dep = map[string]any{
-				"wallet_id":    e.Deposit.WalletID,
-				"txid":         e.Deposit.TxID,
-				"action_index": e.Deposit.ActionIndex,
-				"amount_zat":   e.Deposit.AmountZat,
-				"height":       e.Deposit.Height,
-			}
-		}
-		out = append(out, map[string]any{
-			"event_id":    e.EventID,
-			"type":        string(e.Type),
-			"occurred_at": e.OccurredAt.UTC().Format(time.RFC3339Nano),
-			"invoice_id":  invoiceID,
-			"deposit":     dep,
-			"refund":      nil,
-		})
+		out = append(out, toInvoiceEventJSON(e))
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -479,7 +463,7 @@ func (s *Server) handleStreamPublicInvoiceEvents(w http.ResponseWriter, r *http.
 				continue
 			}
 			for _, e := range evs {
-				msg, _ := json.Marshal(e)
+				msg, _ := json.Marshal(toInvoiceEventJSON(e))
 				_, _ = w.Write([]byte("id: " + e.EventID + "\n"))
 				_, _ = w.Write([]byte("event: invoice_event\n"))
 				_, _ = w.Write([]byte("data: " + string(msg) + "\n\n"))
@@ -1500,6 +1484,163 @@ func (s *Server) handleAdminDeposits(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleAdminRefunds(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPost:
+		s.handleAdminCreateRefund(w, r)
+	case http.MethodGet:
+		s.handleAdminListRefunds(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+type refundCreateRequest struct {
+	MerchantID       string `json:"merchant_id"`
+	InvoiceID        string `json:"invoice_id,omitempty"`
+	ExternalRefundID string `json:"external_refund_id,omitempty"`
+	ToAddress        string `json:"to_address"`
+	AmountZat        int64  `json:"amount_zat"`
+	SentTxID         string `json:"sent_txid,omitempty"`
+	Notes            string `json:"notes,omitempty"`
+}
+
+func (s *Server) handleAdminCreateRefund(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req refundCreateRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", "invalid json")
+		return
+	}
+	req.MerchantID = strings.TrimSpace(req.MerchantID)
+	req.InvoiceID = strings.TrimSpace(req.InvoiceID)
+	req.ExternalRefundID = strings.TrimSpace(req.ExternalRefundID)
+	req.ToAddress = strings.TrimSpace(req.ToAddress)
+	req.SentTxID = strings.TrimSpace(req.SentTxID)
+	req.Notes = strings.TrimSpace(req.Notes)
+	if req.MerchantID == "" {
+		writeError(w, http.StatusBadRequest, "invalid_argument", "merchant_id is required")
+		return
+	}
+	if req.ToAddress == "" {
+		writeError(w, http.StatusBadRequest, "invalid_argument", "to_address is required")
+		return
+	}
+	if req.AmountZat <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid_argument", "amount_zat must be > 0")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	refund, err := s.st.CreateRefund(ctx, store.RefundCreate{
+		MerchantID:       req.MerchantID,
+		InvoiceID:        req.InvoiceID,
+		ExternalRefundID: req.ExternalRefundID,
+		ToAddress:        req.ToAddress,
+		AmountZat:        req.AmountZat,
+		SentTxID:         req.SentTxID,
+		Notes:            req.Notes,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			writeError(w, http.StatusNotFound, "not_found", "not found")
+			return
+		case errors.Is(err, store.ErrForbidden):
+			writeError(w, http.StatusForbidden, "forbidden", "forbidden")
+			return
+		}
+		if de, ok := domain.AsError(err); ok && de.Code == domain.ErrInvalidArgument {
+			writeError(w, http.StatusBadRequest, string(de.Code), de.Message)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"status": "ok",
+		"data":   toRefundJSON(refund),
+	})
+}
+
+func (s *Server) handleAdminListRefunds(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	merchantID := strings.TrimSpace(r.URL.Query().Get("merchant_id"))
+	invoiceID := strings.TrimSpace(r.URL.Query().Get("invoice_id"))
+	status := domain.RefundStatus(strings.TrimSpace(r.URL.Query().Get("status")))
+	switch status {
+	case "", domain.RefundRequested, domain.RefundSent, domain.RefundCanceled:
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_argument", "invalid status")
+		return
+	}
+
+	afterID := int64(0)
+	if v := strings.TrimSpace(r.URL.Query().Get("cursor")); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			writeError(w, http.StatusBadRequest, "invalid_argument", "invalid cursor")
+			return
+		}
+		afterID = n
+	}
+
+	limit := 100
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 500 {
+			writeError(w, http.StatusBadRequest, "invalid_argument", "invalid limit")
+			return
+		}
+		limit = n
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	refunds, nextCursor, err := s.st.ListRefunds(ctx, store.RefundFilter{
+		MerchantID: merchantID,
+		InvoiceID:  invoiceID,
+		Status:     status,
+		AfterID:    afterID,
+		Limit:      limit,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+
+	out := make([]any, 0, len(refunds))
+	for _, refund := range refunds {
+		out = append(out, toRefundJSON(refund))
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok",
+		"data": map[string]any{
+			"refunds":     out,
+			"next_cursor": strconv.FormatInt(nextCursor, 10),
+		},
+	})
+}
+
 func toMerchantJSON(m domain.Merchant) map[string]any {
 	return map[string]any{
 		"merchant_id": m.MerchantID,
@@ -1573,6 +1714,61 @@ func toDepositJSON(d domain.Deposit) map[string]any {
 		"invoice_id":        invoiceID,
 		"detected_at":       d.DetectedAt.UTC().Format(time.RFC3339Nano),
 		"updated_at":        d.UpdatedAt.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func toRefundJSON(r domain.Refund) map[string]any {
+	var invoiceID any = nil
+	if r.InvoiceID != nil && strings.TrimSpace(*r.InvoiceID) != "" {
+		invoiceID = *r.InvoiceID
+	}
+	var externalRefundID any = nil
+	if r.ExternalRefundID != nil && strings.TrimSpace(*r.ExternalRefundID) != "" {
+		externalRefundID = *r.ExternalRefundID
+	}
+	var sentTxID any = nil
+	if r.SentTxID != nil && strings.TrimSpace(*r.SentTxID) != "" {
+		sentTxID = *r.SentTxID
+	}
+
+	return map[string]any{
+		"refund_id":          r.RefundID,
+		"merchant_id":        r.MerchantID,
+		"invoice_id":         invoiceID,
+		"external_refund_id": externalRefundID,
+		"to_address":         r.ToAddress,
+		"amount_zat":         r.AmountZat,
+		"status":             string(r.Status),
+		"sent_txid":          sentTxID,
+		"notes":              r.Notes,
+		"created_at":         r.CreatedAt.UTC().Format(time.RFC3339Nano),
+		"updated_at":         r.UpdatedAt.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func toInvoiceEventJSON(e domain.InvoiceEvent) map[string]any {
+	var dep any = nil
+	if e.Deposit != nil {
+		dep = map[string]any{
+			"wallet_id":    e.Deposit.WalletID,
+			"txid":         e.Deposit.TxID,
+			"action_index": e.Deposit.ActionIndex,
+			"amount_zat":   e.Deposit.AmountZat,
+			"height":       e.Deposit.Height,
+		}
+	}
+	var refund any = nil
+	if e.Refund != nil {
+		refund = toRefundJSON(*e.Refund)
+	}
+
+	return map[string]any{
+		"event_id":    e.EventID,
+		"type":        string(e.Type),
+		"occurred_at": e.OccurredAt.UTC().Format(time.RFC3339Nano),
+		"invoice_id":  e.InvoiceID,
+		"deposit":     dep,
+		"refund":      refund,
 	}
 }
 
