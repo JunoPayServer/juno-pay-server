@@ -2,16 +2,42 @@ package api
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Abdullah1738/juno-pay-server/internal/domain"
 	"github.com/Abdullah1738/juno-pay-server/internal/store"
 )
+
+type Option func(*Server) error
+
+func WithAdminPassword(password string) Option {
+	return func(s *Server) error {
+		password = strings.TrimSpace(password)
+		if password == "" {
+			return errors.New("api: admin password is required")
+		}
+		passHash := sha256.Sum256([]byte(password))
+		sessionKey := sha256.Sum256([]byte("juno-pay-server/session:" + password))
+
+		s.adminEnabled = true
+		s.adminPassHash = passHash
+		s.adminSessionKey = sessionKey
+		if s.adminSessionTTL == 0 {
+			s.adminSessionTTL = 12 * time.Hour
+		}
+		return nil
+	}
+}
 
 type Deriver interface {
 	Derive(ufvk string, uaHRP string, index uint32) (string, error)
@@ -36,9 +62,14 @@ type Server struct {
 	tip      TipSource
 	clock    Clock
 	tokenGen TokenGenerator
+
+	adminEnabled    bool
+	adminPassHash   [32]byte
+	adminSessionKey [32]byte
+	adminSessionTTL time.Duration
 }
 
-func New(st store.Store, deriver Deriver, tip TipSource, clock Clock, tokenGen TokenGenerator) (*Server, error) {
+func New(st store.Store, deriver Deriver, tip TipSource, clock Clock, tokenGen TokenGenerator, opts ...Option) (*Server, error) {
 	if st == nil {
 		return nil, errors.New("api: store is nil")
 	}
@@ -54,21 +85,39 @@ func New(st store.Store, deriver Deriver, tip TipSource, clock Clock, tokenGen T
 	if tokenGen == nil {
 		return nil, errors.New("api: token generator is nil")
 	}
-	return &Server{
+
+	s := &Server{
 		st:       st,
 		deriver:  deriver,
 		tip:      tip,
 		clock:    clock,
 		tokenGen: tokenGen,
-	}, nil
+	}
+
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		if err := opt(s); err != nil {
+			return nil, err
+		}
+	}
+
+	return s, nil
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/admin/login", s.handleAdminLogin)
+	mux.HandleFunc("/admin/logout", s.handleAdminLogout)
 	mux.HandleFunc("/v1/health", s.handleHealth)
 	mux.HandleFunc("/v1/status", s.handleStatus)
 	mux.HandleFunc("/v1/invoices", s.handleInvoices)
 	mux.HandleFunc("/v1/public/invoices/", s.handlePublicInvoices)
+	mux.HandleFunc("/v1/admin/status", s.handleAdminStatus)
+	mux.HandleFunc("/v1/admin/merchants", s.handleAdminMerchants)
+	mux.HandleFunc("/v1/admin/merchants/", s.handleAdminMerchantSubroutes)
+	mux.HandleFunc("/v1/admin/api-keys/", s.handleAdminAPIKeys)
 	return mux
 }
 
@@ -376,6 +425,538 @@ func toInvoiceJSON(inv domain.Invoice) map[string]any {
 		"created_at":             inv.CreatedAt.UTC().Format(time.RFC3339Nano),
 		"updated_at":             inv.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
+}
+
+func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.adminEnabled {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
+		return
+	}
+
+	var req struct {
+		Password string `json:"password"`
+	}
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", "invalid json")
+		return
+	}
+	pw := strings.TrimSpace(req.Password)
+	if pw == "" {
+		writeError(w, http.StatusBadRequest, "invalid_argument", "password is required")
+		return
+	}
+	if !s.checkAdminPassword(pw) {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
+		return
+	}
+
+	if err := s.setAdminSessionCookie(w); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "session error")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	s.clearAdminSessionCookie(w)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	// TODO: include scanner sync, restarts/backfill indicators, outbox backlog.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok",
+		"data": map[string]any{
+			"ok": true,
+		},
+	})
+}
+
+func (s *Server) handleAdminMerchants(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPost:
+		s.handleAdminCreateMerchant(w, r)
+	case http.MethodGet:
+		s.handleAdminListMerchants(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+type merchantCreateRequest struct {
+	Name     string                 `json:"name"`
+	Settings *merchantSettingsInput `json:"settings,omitempty"`
+}
+
+type merchantSettingsInput struct {
+	InvoiceTTLSeconds     int64                `json:"invoice_ttl_seconds"`
+	RequiredConfirmations int32                `json:"required_confirmations"`
+	Policies              invoicePoliciesInput `json:"policies"`
+}
+
+type invoicePoliciesInput struct {
+	LatePaymentPolicy    string `json:"late_payment_policy"`
+	PartialPaymentPolicy string `json:"partial_payment_policy"`
+	OverpaymentPolicy    string `json:"overpayment_policy"`
+}
+
+func defaultMerchantSettings() domain.MerchantSettings {
+	return domain.MerchantSettings{
+		InvoiceTTLSeconds:     900,
+		RequiredConfirmations: 100,
+		Policies: domain.InvoicePolicies{
+			LatePayment:    domain.LatePaymentManualReview,
+			PartialPayment: domain.PartialPaymentAccept,
+			Overpayment:    domain.OverpaymentManualReview,
+		},
+	}
+}
+
+func (in merchantSettingsInput) toDomain() domain.MerchantSettings {
+	return domain.MerchantSettings{
+		InvoiceTTLSeconds:     in.InvoiceTTLSeconds,
+		RequiredConfirmations: in.RequiredConfirmations,
+		Policies: domain.InvoicePolicies{
+			LatePayment:    domain.LatePaymentPolicy(in.Policies.LatePaymentPolicy),
+			PartialPayment: domain.PartialPaymentPolicy(in.Policies.PartialPaymentPolicy),
+			Overpayment:    domain.OverpaymentPolicy(in.Policies.OverpaymentPolicy),
+		},
+	}
+}
+
+func (s *Server) handleAdminCreateMerchant(w http.ResponseWriter, r *http.Request) {
+	var req merchantCreateRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", "invalid json")
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "invalid_argument", "name is required")
+		return
+	}
+
+	settings := defaultMerchantSettings()
+	if req.Settings != nil {
+		settings = req.Settings.toDomain()
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	m, err := s.st.CreateMerchant(ctx, req.Name, settings)
+	if err != nil {
+		if de, ok := domain.AsError(err); ok && de.Code == domain.ErrInvalidArgument {
+			writeError(w, http.StatusBadRequest, string(de.Code), de.Message)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"status": "ok",
+		"data":   toMerchantJSON(m),
+	})
+}
+
+func (s *Server) handleAdminListMerchants(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	ms, err := s.st.ListMerchants(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+	out := make([]any, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, toMerchantJSON(m))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok",
+		"data":   out,
+	})
+}
+
+func (s *Server) handleAdminMerchantSubroutes(w http.ResponseWriter, r *http.Request) {
+	// /v1/admin/merchants/{merchant_id}/...
+	if !s.requireAdmin(w, r) {
+		return
+	}
+
+	path := strings.TrimPrefix(r.URL.Path, "/v1/admin/merchants/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 1 || parts[0] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	merchantID := parts[0]
+	if len(parts) == 1 {
+		s.handleAdminGetMerchant(w, r, merchantID)
+		return
+	}
+	switch parts[1] {
+	case "wallet":
+		s.handleAdminSetMerchantWallet(w, r, merchantID)
+	case "settings":
+		s.handleAdminSetMerchantSettings(w, r, merchantID)
+	case "api-keys":
+		s.handleAdminCreateMerchantAPIKey(w, r, merchantID)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) handleAdminGetMerchant(w http.ResponseWriter, r *http.Request, merchantID string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	m, ok, err := s.st.GetMerchant(ctx, merchantID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "merchant not found")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok",
+		"data":   toMerchantJSON(m),
+	})
+}
+
+type merchantWalletSetRequest struct {
+	WalletID string `json:"wallet_id,omitempty"`
+	UFVK     string `json:"ufvk"`
+	Chain    string `json:"chain"`
+	UAHRP    string `json:"ua_hrp"`
+	CoinType int32  `json:"coin_type"`
+}
+
+func (s *Server) handleAdminSetMerchantWallet(w http.ResponseWriter, r *http.Request, merchantID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req merchantWalletSetRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", "invalid json")
+		return
+	}
+	req.WalletID = strings.TrimSpace(req.WalletID)
+	req.UFVK = strings.TrimSpace(req.UFVK)
+	req.Chain = strings.TrimSpace(req.Chain)
+	req.UAHRP = strings.TrimSpace(req.UAHRP)
+	if req.WalletID == "" {
+		req.WalletID = "wallet_" + merchantID
+	}
+	if req.UFVK == "" || req.Chain == "" || req.UAHRP == "" {
+		writeError(w, http.StatusBadRequest, "invalid_argument", "ufvk, chain, and ua_hrp are required")
+		return
+	}
+	if _, err := s.deriver.Derive(req.UFVK, req.UAHRP, 0); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_argument", "invalid ufvk")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	w0, err := s.st.SetMerchantWallet(ctx, merchantID, store.MerchantWallet{
+		WalletID: req.WalletID,
+		UFVK:     req.UFVK,
+		Chain:    req.Chain,
+		UAHRP:    req.UAHRP,
+		CoinType: req.CoinType,
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "conflict", "wallet already set")
+			return
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "merchant not found")
+			return
+		}
+		if de, ok := domain.AsError(err); ok && de.Code == domain.ErrInvalidArgument {
+			writeError(w, http.StatusBadRequest, string(de.Code), de.Message)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok",
+		"data":   toMerchantWalletJSON(w0),
+	})
+}
+
+func (s *Server) handleAdminSetMerchantSettings(w http.ResponseWriter, r *http.Request, merchantID string) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var in merchantSettingsInput
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", "invalid json")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	m, err := s.st.UpdateMerchantSettings(ctx, merchantID, in.toDomain())
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "merchant not found")
+			return
+		}
+		if de, ok := domain.AsError(err); ok && de.Code == domain.ErrInvalidArgument {
+			writeError(w, http.StatusBadRequest, string(de.Code), de.Message)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok",
+		"data":   toMerchantJSON(m),
+	})
+}
+
+func (s *Server) handleAdminCreateMerchantAPIKey(w http.ResponseWriter, r *http.Request, merchantID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Label string `json:"label,omitempty"`
+	}
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", "invalid json")
+		return
+	}
+	label := strings.TrimSpace(req.Label)
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	keyID, apiKey, err := s.st.CreateMerchantAPIKey(ctx, merchantID, label)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "merchant not found")
+			return
+		}
+		if de, ok := domain.AsError(err); ok && de.Code == domain.ErrInvalidArgument {
+			writeError(w, http.StatusBadRequest, string(de.Code), de.Message)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+
+	createdAt := s.clock.Now().UTC().Format(time.RFC3339Nano)
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"status": "ok",
+		"data": map[string]any{
+			"api_key": apiKey,
+			"key": map[string]any{
+				"key_id":      keyID,
+				"merchant_id": merchantID,
+				"label":       label,
+				"created_at":  createdAt,
+				"revoked_at":  nil,
+			},
+		},
+	})
+}
+
+func (s *Server) handleAdminAPIKeys(w http.ResponseWriter, r *http.Request) {
+	// /v1/admin/api-keys/{key_id}
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	keyID := strings.TrimPrefix(r.URL.Path, "/v1/admin/api-keys/")
+	keyID = strings.TrimSpace(keyID)
+	if keyID == "" || strings.Contains(keyID, "/") {
+		http.NotFound(w, r)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	err := s.st.RevokeMerchantAPIKey(ctx, keyID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+}
+
+func toMerchantJSON(m domain.Merchant) map[string]any {
+	return map[string]any{
+		"merchant_id": m.MerchantID,
+		"name":        m.Name,
+		"status":      string(m.Status),
+		"settings": map[string]any{
+			"invoice_ttl_seconds":    m.Settings.InvoiceTTLSeconds,
+			"required_confirmations": m.Settings.RequiredConfirmations,
+			"policies": map[string]any{
+				"late_payment_policy":    string(m.Settings.Policies.LatePayment),
+				"partial_payment_policy": string(m.Settings.Policies.PartialPayment),
+				"overpayment_policy":     string(m.Settings.Policies.Overpayment),
+			},
+		},
+		"created_at": m.CreatedAt.UTC().Format(time.RFC3339Nano),
+		"updated_at": m.UpdatedAt.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func toMerchantWalletJSON(w0 store.MerchantWallet) map[string]any {
+	return map[string]any{
+		"merchant_id": w0.MerchantID,
+		"wallet_id":   w0.WalletID,
+		"ufvk":        w0.UFVK,
+		"chain":       w0.Chain,
+		"ua_hrp":      w0.UAHRP,
+		"coin_type":   w0.CoinType,
+		"created_at":  w0.CreatedAt.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func (s *Server) checkAdminPassword(password string) bool {
+	sum := sha256.Sum256([]byte(password))
+	return subtle.ConstantTimeCompare(sum[:], s.adminPassHash[:]) == 1
+}
+
+func (s *Server) setAdminSessionCookie(w http.ResponseWriter) error {
+	ttl := s.adminSessionTTL
+	if ttl <= 0 {
+		ttl = 12 * time.Hour
+	}
+	exp := s.clock.Now().UTC().Add(ttl).Unix()
+
+	var nonce [32]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return err
+	}
+
+	payload := "v1." + strconv.FormatInt(exp, 10) + "." + hex.EncodeToString(nonce[:])
+	sig := s.adminSign(payload)
+	c := &http.Cookie{
+		Name:     "juno_admin_session",
+		Value:    payload + "." + hex.EncodeToString(sig),
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	}
+	http.SetCookie(w, c)
+	return nil
+}
+
+func (s *Server) clearAdminSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "juno_admin_session",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func (s *Server) isAdminAuthenticated(r *http.Request) bool {
+	c, err := r.Cookie("juno_admin_session")
+	if err != nil || c == nil {
+		return false
+	}
+	parts := strings.Split(c.Value, ".")
+	if len(parts) != 4 {
+		return false
+	}
+	if parts[0] != "v1" {
+		return false
+	}
+	exp, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || exp <= 0 {
+		return false
+	}
+	if s.clock.Now().UTC().Unix() > exp {
+		return false
+	}
+
+	payload := strings.Join(parts[:3], ".")
+	sig, err := hex.DecodeString(parts[3])
+	if err != nil || len(sig) != sha256.Size {
+		return false
+	}
+	want := s.adminSign(payload)
+	return subtle.ConstantTimeCompare(sig, want) == 1
+}
+
+func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	if !s.adminEnabled || !s.isAdminAuthenticated(r) {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
+		return false
+	}
+	return true
+}
+
+func (s *Server) adminSign(payload string) []byte {
+	mac := hmac.New(sha256.New, s.adminSessionKey[:])
+	_, _ = mac.Write([]byte(payload))
+	return mac.Sum(nil)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

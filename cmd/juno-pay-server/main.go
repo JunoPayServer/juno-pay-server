@@ -18,6 +18,10 @@ import (
 
 func main() {
 	addr := getenv("JUNO_PAY_ADDR", "127.0.0.1:8080")
+	adminPassword := getenv("JUNO_PAY_ADMIN_PASSWORD", "")
+	if adminPassword == "" {
+		log.Fatalf("missing env: JUNO_PAY_ADMIN_PASSWORD")
+	}
 
 	st := store.NewMem()
 
@@ -26,7 +30,7 @@ func main() {
 	rpcPass := getenv("JUNO_CASHD_RPC_PASS", "")
 	jcd := junocashd.New(rpcURL, rpcUser, rpcPass)
 
-	s, err := api.New(st, keysDeriver{d: ffi.New()}, junocashdTip{cli: jcd}, realClock{}, randTokenGen{})
+	s, err := api.New(st, keysDeriver{d: ffi.New()}, junocashdTip{cli: jcd}, realClock{}, randTokenGen{}, api.WithAdminPassword(adminPassword))
 	if err != nil {
 		log.Fatalf("init error: %v", err)
 	}
