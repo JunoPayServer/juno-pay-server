@@ -2,9 +2,12 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/Abdullah1738/juno-pay-server/internal/domain"
+	"github.com/Abdullah1738/juno-sdk-go/types"
 )
 
 func TestMemStore_MerchantLifecycle(t *testing.T) {
@@ -118,14 +121,14 @@ func TestMemStore_CreateInvoice_IdempotentByExternalOrderID(t *testing.T) {
 	}
 
 	req := InvoiceCreate{
-		MerchantID:       m.MerchantID,
-		ExternalOrderID:  "order-1",
-		WalletID:         "w1",
-		AddressIndex:     0,
-		Address:          "j1abc",
-		CreatedAfterHeight: 100,
-		CreatedAfterHash:   "hash100",
-		AmountZat:          10,
+		MerchantID:            m.MerchantID,
+		ExternalOrderID:       "order-1",
+		WalletID:              "w1",
+		AddressIndex:          0,
+		Address:               "j1abc",
+		CreatedAfterHeight:    100,
+		CreatedAfterHash:      "hash100",
+		AmountZat:             10,
 		RequiredConfirmations: 100,
 		Policies: domain.InvoicePolicies{
 			LatePayment:    domain.LatePaymentMarkPaidLate,
@@ -290,5 +293,137 @@ func TestMemStore_InvoiceToken(t *testing.T) {
 	}
 	if !ok || tok != "tok" {
 		t.Fatalf("unexpected token result")
+	}
+}
+
+func TestMemStore_ListInvoices_FilterAndCursor(t *testing.T) {
+	st := NewMem()
+	ctx := context.Background()
+
+	settings := domain.MerchantSettings{
+		InvoiceTTLSeconds:     0,
+		RequiredConfirmations: 0,
+		Policies: domain.InvoicePolicies{
+			LatePayment:    domain.LatePaymentMarkPaidLate,
+			PartialPayment: domain.PartialPaymentAccept,
+			Overpayment:    domain.OverpaymentMarkOverpaid,
+		},
+	}
+
+	m1, err := st.CreateMerchant(ctx, "m1", settings)
+	if err != nil {
+		t.Fatalf("CreateMerchant m1: %v", err)
+	}
+	m2, err := st.CreateMerchant(ctx, "m2", settings)
+	if err != nil {
+		t.Fatalf("CreateMerchant m2: %v", err)
+	}
+
+	i1, _, err := st.CreateInvoice(ctx, InvoiceCreate{
+		MerchantID:            m1.MerchantID,
+		ExternalOrderID:       "order-1",
+		WalletID:              "w1",
+		AddressIndex:          0,
+		Address:               "j1a",
+		CreatedAfterHeight:    0,
+		CreatedAfterHash:      "h0",
+		AmountZat:             10,
+		RequiredConfirmations: 0,
+		Policies:              settings.Policies,
+	})
+	if err != nil {
+		t.Fatalf("CreateInvoice i1: %v", err)
+	}
+	i2, _, err := st.CreateInvoice(ctx, InvoiceCreate{
+		MerchantID:            m1.MerchantID,
+		ExternalOrderID:       "order-2",
+		WalletID:              "w1",
+		AddressIndex:          1,
+		Address:               "j1b",
+		CreatedAfterHeight:    0,
+		CreatedAfterHash:      "h0",
+		AmountZat:             5,
+		RequiredConfirmations: 0,
+		Policies:              settings.Policies,
+	})
+	if err != nil {
+		t.Fatalf("CreateInvoice i2: %v", err)
+	}
+	if _, _, err := st.CreateInvoice(ctx, InvoiceCreate{
+		MerchantID:            m2.MerchantID,
+		ExternalOrderID:       "order-3",
+		WalletID:              "w2",
+		AddressIndex:          0,
+		Address:               "j1c",
+		CreatedAfterHeight:    0,
+		CreatedAfterHash:      "h0",
+		AmountZat:             7,
+		RequiredConfirmations: 0,
+		Policies:              settings.Policies,
+	}); err != nil {
+		t.Fatalf("CreateInvoice i3: %v", err)
+	}
+
+	// Mark i2 as paid.
+	p := types.DepositConfirmedPayload{
+		DepositEventPayload: types.DepositEventPayload{
+			DepositEvent: types.DepositEvent{
+				WalletID:       "w1",
+				TxID:           "tx1",
+				Height:         1,
+				ActionIndex:    0,
+				AmountZatoshis: 5,
+			},
+			RecipientAddress: "j1b",
+		},
+		ConfirmedHeight:       1,
+		RequiredConfirmations: 0,
+	}
+	b, _ := json.Marshal(p)
+	if err := st.ApplyScanEvent(ctx, ScanEvent{
+		WalletID:   "w1",
+		Cursor:     1,
+		Kind:       string(types.WalletEventKindDepositConfirmed),
+		Payload:    b,
+		OccurredAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("ApplyScanEvent: %v", err)
+	}
+
+	// Cursor paging (m1 only).
+	page1, cur1, err := st.ListInvoices(ctx, InvoiceFilter{MerchantID: m1.MerchantID, AfterID: 0, Limit: 1})
+	if err != nil {
+		t.Fatalf("ListInvoices page1: %v", err)
+	}
+	if len(page1) != 1 || page1[0].InvoiceID != i1.InvoiceID {
+		t.Fatalf("expected first invoice i1")
+	}
+	page2, cur2, err := st.ListInvoices(ctx, InvoiceFilter{MerchantID: m1.MerchantID, AfterID: cur1, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListInvoices page2: %v", err)
+	}
+	if len(page2) != 1 || page2[0].InvoiceID != i2.InvoiceID {
+		t.Fatalf("expected second invoice i2")
+	}
+	if cur2 <= cur1 {
+		t.Fatalf("expected cursor to advance")
+	}
+
+	// Status filter.
+	paid, _, err := st.ListInvoices(ctx, InvoiceFilter{MerchantID: m1.MerchantID, Status: domain.InvoicePaid, AfterID: 0, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListInvoices paid: %v", err)
+	}
+	if len(paid) != 1 || paid[0].InvoiceID != i2.InvoiceID {
+		t.Fatalf("expected only i2 to be paid")
+	}
+
+	// External order ID filter.
+	byExt, _, err := st.ListInvoices(ctx, InvoiceFilter{MerchantID: m1.MerchantID, ExternalOrderID: "order-1", AfterID: 0, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListInvoices byExt: %v", err)
+	}
+	if len(byExt) != 1 || byExt[0].InvoiceID != i1.InvoiceID {
+		t.Fatalf("expected only i1 for external_order_id")
 	}
 }

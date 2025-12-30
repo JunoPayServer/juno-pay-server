@@ -818,6 +818,127 @@ func (s *Store) FindInvoiceByExternalOrderID(ctx context.Context, merchantID, ex
 	return inv, true, nil
 }
 
+func (s *Store) ListInvoices(ctx context.Context, f store.InvoiceFilter) ([]domain.Invoice, int64, error) {
+	f.MerchantID = strings.TrimSpace(f.MerchantID)
+	f.ExternalOrderID = strings.TrimSpace(f.ExternalOrderID)
+	if f.AfterID < 0 {
+		f.AfterID = 0
+	}
+	if f.Limit <= 0 || f.Limit > 1000 {
+		f.Limit = 100
+	}
+
+	where := []string{"rowid > ?"}
+	args := []any{f.AfterID}
+
+	if f.MerchantID != "" {
+		where = append(where, "merchant_id = ?")
+		args = append(args, f.MerchantID)
+	}
+	if f.Status != "" {
+		where = append(where, "status = ?")
+		args = append(args, string(f.Status))
+	}
+	if f.ExternalOrderID != "" {
+		where = append(where, "external_order_id = ?")
+		args = append(args, f.ExternalOrderID)
+	}
+
+	args = append(args, f.Limit)
+	q := `
+		SELECT rowid,
+		       invoice_id, merchant_id, external_order_id, wallet_id, address_index, address, created_after_height, created_after_hash,
+		       amount_zat, required_confirmations,
+		       policy_late_payment, policy_partial_payment, policy_overpayment,
+		       received_pending_zat, received_confirmed_zat,
+		       status, expires_at, created_at, updated_at
+		FROM invoices
+		WHERE ` + strings.Join(where, " AND ") + `
+		ORDER BY rowid
+		LIMIT ?
+	`
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	out := make([]domain.Invoice, 0, f.Limit)
+	var nextCursor int64
+	for rows.Next() {
+		var (
+			seq              int64
+			invoiceID        string
+			merchantID       string
+			externalOrderID  string
+			walletID         string
+			addressIndex     uint32
+			address          string
+			createdAfterH    int64
+			createdAfterHash string
+			amountZat        int64
+			requiredConfs    int32
+			latePolicy       string
+			partialPolicy    string
+			overpayPolicy    string
+			recvPending      int64
+			recvConfirmed    int64
+			status           string
+			expiresAtUnix    sql.NullInt64
+			createdAtUnix    int64
+			updatedAtUnix    int64
+		)
+		if err := rows.Scan(
+			&seq,
+			&invoiceID, &merchantID, &externalOrderID,
+			&walletID, &addressIndex, &address,
+			&createdAfterH, &createdAfterHash,
+			&amountZat, &requiredConfs,
+			&latePolicy, &partialPolicy, &overpayPolicy,
+			&recvPending, &recvConfirmed,
+			&status, &expiresAtUnix, &createdAtUnix, &updatedAtUnix,
+		); err != nil {
+			return nil, 0, err
+		}
+
+		var expiresAt *time.Time
+		if expiresAtUnix.Valid {
+			t := time.Unix(expiresAtUnix.Int64, 0).UTC()
+			expiresAt = &t
+		}
+
+		out = append(out, domain.Invoice{
+			InvoiceID:             invoiceID,
+			MerchantID:            merchantID,
+			ExternalOrderID:       externalOrderID,
+			WalletID:              walletID,
+			AddressIndex:          addressIndex,
+			Address:               address,
+			CreatedAfterHeight:    createdAfterH,
+			CreatedAfterHash:      createdAfterHash,
+			AmountZat:             amountZat,
+			RequiredConfirmations: requiredConfs,
+			Policies: domain.InvoicePolicies{
+				LatePayment:    domain.LatePaymentPolicy(latePolicy),
+				PartialPayment: domain.PartialPaymentPolicy(partialPolicy),
+				Overpayment:    domain.OverpaymentPolicy(overpayPolicy),
+			},
+			ReceivedPendingZat:   recvPending,
+			ReceivedConfirmedZat: recvConfirmed,
+			Status:               domain.InvoiceStatus(status),
+			ExpiresAt:            expiresAt,
+			CreatedAt:            time.Unix(createdAtUnix, 0).UTC(),
+			UpdatedAt:            time.Unix(updatedAtUnix, 0).UTC(),
+		})
+		nextCursor = seq
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return out, nextCursor, nil
+}
+
 func (s *Store) PutInvoiceToken(ctx context.Context, invoiceID string, token string) error {
 	invoiceID = strings.TrimSpace(invoiceID)
 	token = strings.TrimSpace(token)
@@ -1249,13 +1370,13 @@ func (s *Store) ListEventDeliveries(ctx context.Context, f store.EventDeliveryFi
 	var out []domain.EventDelivery
 	for rows.Next() {
 		var (
-			deliveryID string
-			sinkID     string
-			eventID    string
-			status     string
-			attempt    int32
-			nextUnix   sql.NullInt64
-			lastErr    sql.NullString
+			deliveryID  string
+			sinkID      string
+			eventID     string
+			status      string
+			attempt     int32
+			nextUnix    sql.NullInt64
+			lastErr     sql.NullString
 			createdUnix int64
 			updatedUnix int64
 		)
@@ -1318,20 +1439,20 @@ func (s *Store) ListDueDeliveries(ctx context.Context, now time.Time, limit int)
 	var out []store.DueDelivery
 	for rows.Next() {
 		var (
-			deliveryID  string
-			merchantID  string
-			sinkID      string
-			eventID     string
-			dStatus     string
-			attempt     int32
-			nextUnix    sql.NullInt64
-			lastErr     sql.NullString
+			deliveryID   string
+			merchantID   string
+			sinkID       string
+			eventID      string
+			dStatus      string
+			attempt      int32
+			nextUnix     sql.NullInt64
+			lastErr      sql.NullString
 			dCreatedUnix int64
 			dUpdatedUnix int64
 
-			sKind       string
-			sStatus     string
-			sConfig     []byte
+			sKind        string
+			sStatus      string
+			sConfig      []byte
 			sCreatedUnix int64
 			sUpdatedUnix int64
 

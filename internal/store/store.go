@@ -31,9 +31,9 @@ type InvoiceCreate struct {
 	MerchantID      string
 	ExternalOrderID string
 
-	WalletID          string
-	AddressIndex      uint32
-	Address           string
+	WalletID           string
+	AddressIndex       uint32
+	Address            string
 	CreatedAfterHeight int64
 	CreatedAfterHash   string
 
@@ -41,6 +41,15 @@ type InvoiceCreate struct {
 	RequiredConfirmations int32
 	Policies              domain.InvoicePolicies
 	ExpiresAt             *time.Time
+}
+
+type InvoiceFilter struct {
+	MerchantID      string
+	Status          domain.InvoiceStatus
+	ExternalOrderID string
+
+	AfterID int64
+	Limit   int
 }
 
 type ScanEvent struct {
@@ -93,6 +102,7 @@ type Store interface {
 	CreateInvoice(ctx context.Context, req InvoiceCreate) (domain.Invoice, bool, error)
 	GetInvoice(ctx context.Context, invoiceID string) (domain.Invoice, bool, error)
 	FindInvoiceByExternalOrderID(ctx context.Context, merchantID, externalOrderID string) (domain.Invoice, bool, error)
+	ListInvoices(ctx context.Context, f InvoiceFilter) (invoices []domain.Invoice, nextCursor int64, err error)
 
 	// Invoice checkout token (stored encrypted-at-rest in production DB).
 	PutInvoiceToken(ctx context.Context, invoiceID string, token string) error

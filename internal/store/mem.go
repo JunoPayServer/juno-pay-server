@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,9 +46,9 @@ type MemStore struct {
 	invoiceEventSeq int64
 	invoiceEvents   map[string][]domain.InvoiceEvent // invoice_id -> events
 
-	eventSinks  map[string]domain.EventSink         // sink_id -> sink
-	outbox      []outboxEventRecord                 // ordered by seq
-	deliveries  map[string]domain.EventDelivery     // delivery_id -> delivery
+	eventSinks map[string]domain.EventSink     // sink_id -> sink
+	outbox     []outboxEventRecord             // ordered by seq
+	deliveries map[string]domain.EventDelivery // delivery_id -> delivery
 }
 
 type apiKeyRecord struct {
@@ -400,6 +401,61 @@ func (s *MemStore) FindInvoiceByExternalOrderID(_ context.Context, merchantID, e
 	}
 	inv, ok := s.invoices[id]
 	return inv, ok, nil
+}
+
+func (s *MemStore) ListInvoices(_ context.Context, f InvoiceFilter) ([]domain.Invoice, int64, error) {
+	f.MerchantID = strings.TrimSpace(f.MerchantID)
+	f.ExternalOrderID = strings.TrimSpace(f.ExternalOrderID)
+	if f.AfterID < 0 {
+		f.AfterID = 0
+	}
+	if f.Limit <= 0 || f.Limit > 1000 {
+		f.Limit = 100
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	type rec struct {
+		Seq int64
+		Inv domain.Invoice
+	}
+
+	recs := make([]rec, 0, len(s.invoices))
+	for _, inv := range s.invoices {
+		if f.MerchantID != "" && inv.MerchantID != f.MerchantID {
+			continue
+		}
+		if f.Status != "" && inv.Status != f.Status {
+			continue
+		}
+		if f.ExternalOrderID != "" && inv.ExternalOrderID != f.ExternalOrderID {
+			continue
+		}
+		seq := int64(0)
+		if parts := strings.SplitN(inv.InvoiceID, "_", 2); len(parts) == 2 {
+			if n, err := strconv.ParseInt(parts[1], 16, 64); err == nil && n > 0 {
+				seq = n
+			}
+		}
+		if seq <= f.AfterID {
+			continue
+		}
+		recs = append(recs, rec{Seq: seq, Inv: inv})
+	}
+
+	sort.Slice(recs, func(i, j int) bool { return recs[i].Seq < recs[j].Seq })
+
+	out := make([]domain.Invoice, 0, f.Limit)
+	var nextCursor int64
+	for _, r := range recs {
+		out = append(out, r.Inv)
+		nextCursor = r.Seq
+		if len(out) >= f.Limit {
+			break
+		}
+	}
+	return out, nextCursor, nil
 }
 
 func (s *MemStore) PutInvoiceToken(_ context.Context, invoiceID string, token string) error {
