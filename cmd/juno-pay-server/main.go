@@ -7,12 +7,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/Abdullah1738/juno-pay-server/internal/api"
 	"github.com/Abdullah1738/juno-pay-server/internal/keys"
 	"github.com/Abdullah1738/juno-pay-server/internal/keys/ffi"
-	"github.com/Abdullah1738/juno-pay-server/internal/store"
+	"github.com/Abdullah1738/juno-pay-server/internal/store/sqlite"
 	"github.com/Abdullah1738/juno-sdk-go/junocashd"
 )
 
@@ -23,7 +24,27 @@ func main() {
 		log.Fatalf("missing env: JUNO_PAY_ADMIN_PASSWORD")
 	}
 
-	st := store.NewMem()
+	dataDir := getenv("JUNO_PAY_DATA_DIR", defaultDataDir())
+	tokenKeyHex := getenv("JUNO_PAY_TOKEN_KEY_HEX", "")
+	if tokenKeyHex == "" {
+		log.Fatalf("missing env: JUNO_PAY_TOKEN_KEY_HEX")
+	}
+	tokenKey, err := hex.DecodeString(tokenKeyHex)
+	if err != nil || len(tokenKey) != 32 {
+		log.Fatalf("invalid JUNO_PAY_TOKEN_KEY_HEX (expected 32-byte hex)")
+	}
+
+	st, err := sqlite.Open(dataDir, tokenKey)
+	if err != nil {
+		log.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := st.Init(ctx); err != nil {
+		log.Fatalf("init store: %v", err)
+	}
 
 	rpcURL := getenv("JUNO_CASHD_RPC_URL", "http://127.0.0.1:8232")
 	rpcUser := getenv("JUNO_CASHD_RPC_USER", "")
@@ -52,6 +73,13 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func defaultDataDir() string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".juno-pay-server")
+	}
+	return ".juno-pay-server"
 }
 
 type keysDeriver struct{ d keys.Deriver }
