@@ -1,0 +1,1847 @@
+openapi: 3.1.0
+info:
+  title: Juno Pay Server API
+  version: 0.1.0
+  description: |
+    Self-hosted payment backend for Juno Cash (Orchard-only / shielded-by-default).
+
+    Conventions:
+    - Amounts are `zat` (int64), not floating point.
+    - Most responses are wrapped as `{ "status": "ok", "data": ... }` or `{ "status": "error", "error": ... }`.
+servers:
+  - url: http://localhost:8080
+
+paths:
+  /admin/login:
+    post:
+      summary: Admin login (sets session cookie)
+      operationId: adminLogin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminLoginRequest"
+      responses:
+        "204":
+          description: Logged in (cookie set)
+        "401":
+          description: Invalid password
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /admin/logout:
+    post:
+      summary: Admin logout (clears session cookie)
+      operationId: adminLogout
+      security:
+        - AdminSession: []
+      responses:
+        "204":
+          description: Logged out
+
+  /v1/health:
+    get:
+      summary: Health check
+      operationId: health
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkHealthResponse"
+
+  /v1/status:
+    get:
+      summary: Public status (sync + backlog)
+      operationId: status
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkStatusResponse"
+
+  /v1/invoices:
+    post:
+      summary: Create invoice (merchant API)
+      operationId: createInvoice
+      security:
+        - MerchantApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InvoiceCreateRequest"
+      responses:
+        "200":
+          description: OK (idempotent replay)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkInvoiceResponse"
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkInvoiceResponse"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Idempotency conflict (same external_order_id, different request)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/public/invoices/{invoice_id}:
+    get:
+      summary: Get invoice for checkout (token-based)
+      operationId: getPublicInvoice
+      parameters:
+        - name: invoice_id
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/InvoiceID"
+        - name: token
+          in: query
+          required: true
+          description: Invoice token returned by invoice creation.
+          schema:
+            type: string
+            minLength: 16
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkPublicInvoiceResponse"
+        "401":
+          description: Invalid token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/public/invoices/{invoice_id}/events:
+    get:
+      summary: Poll invoice events (token-based)
+      operationId: listPublicInvoiceEvents
+      parameters:
+        - name: invoice_id
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/InvoiceID"
+        - name: token
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 16
+        - name: cursor
+          in: query
+          required: false
+          description: Cursor for pagination. Omit for start.
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkInvoiceEventsResponse"
+        "401":
+          description: Invalid token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/public/invoices/{invoice_id}/stream:
+    get:
+      summary: Stream invoice events (SSE; token-based)
+      operationId: streamPublicInvoiceEvents
+      parameters:
+        - name: invoice_id
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/InvoiceID"
+        - name: token
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 16
+      responses:
+        "200":
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
+  /v1/demo/air/purchase:
+    post:
+      summary: Demo checkout - buy 1 gallon of air for 1 JUNO
+      operationId: demoBuyAir
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DemoAirPurchaseRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkInvoiceResponse"
+
+  /v1/admin/status:
+    get:
+      summary: Admin status (sync + restarts + backlog)
+      operationId: adminStatus
+      security:
+        - AdminSession: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkAdminStatusResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/admin/merchants:
+    post:
+      summary: Create merchant
+      operationId: adminCreateMerchant
+      security:
+        - AdminSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MerchantCreateRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkMerchantResponse"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    get:
+      summary: List merchants
+      operationId: adminListMerchants
+      security:
+        - AdminSession: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkMerchantsResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/admin/merchants/{merchant_id}:
+    get:
+      summary: Get merchant
+      operationId: adminGetMerchant
+      security:
+        - AdminSession: []
+      parameters:
+        - name: merchant_id
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/MerchantID"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkMerchantResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/admin/merchants/{merchant_id}/wallet:
+    post:
+      summary: Set merchant UFVK (immutable)
+      operationId: adminSetMerchantWallet
+      security:
+        - AdminSession: []
+      parameters:
+        - name: merchant_id
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/MerchantID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MerchantWalletSetRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkMerchantWalletResponse"
+        "409":
+          description: Wallet already set (immutable)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/admin/merchants/{merchant_id}/settings:
+    put:
+      summary: Set merchant invoice settings (expiry + policies)
+      operationId: adminSetMerchantSettings
+      security:
+        - AdminSession: []
+      parameters:
+        - name: merchant_id
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/MerchantID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MerchantSettings"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkMerchantResponse"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/admin/merchants/{merchant_id}/api-keys:
+    post:
+      summary: Create merchant API key (invoice creation)
+      operationId: adminCreateMerchantApiKey
+      security:
+        - AdminSession: []
+      parameters:
+        - name: merchant_id
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/MerchantID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MerchantApiKeyCreateRequest"
+      responses:
+        "201":
+          description: Created (plaintext key returned once)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkMerchantApiKeyCreatedResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/admin/api-keys/{key_id}:
+    delete:
+      summary: Revoke merchant API key
+      operationId: adminRevokeMerchantApiKey
+      security:
+        - AdminSession: []
+      parameters:
+        - name: key_id
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/ApiKeyID"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEmptyResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/admin/event-sinks:
+    post:
+      summary: Create an event sink (webhook or broker)
+      operationId: adminCreateEventSink
+      security:
+        - AdminSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EventSinkCreateRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEventSinkResponse"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    get:
+      summary: List event sinks
+      operationId: adminListEventSinks
+      security:
+        - AdminSession: []
+      parameters:
+        - name: merchant_id
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/MerchantID"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEventSinksResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/admin/event-sinks/{sink_id}/test:
+    post:
+      summary: Send a test event to a sink
+      operationId: adminTestEventSink
+      security:
+        - AdminSession: []
+      parameters:
+        - name: sink_id
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/EventSinkID"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEmptyResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/admin/event-deliveries:
+    get:
+      summary: List event deliveries (debug)
+      operationId: adminListEventDeliveries
+      security:
+        - AdminSession: []
+      parameters:
+        - name: merchant_id
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/MerchantID"
+        - name: sink_id
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/EventSinkID"
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/EventDeliveryStatus"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEventDeliveriesResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/admin/review-cases:
+    get:
+      summary: List manual review cases
+      operationId: adminListReviewCases
+      security:
+        - AdminSession: []
+      parameters:
+        - name: merchant_id
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/MerchantID"
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/ReviewStatus"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkReviewCasesResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/admin/review-cases/{review_id}/resolve:
+    post:
+      summary: Resolve a review case
+      operationId: adminResolveReviewCase
+      security:
+        - AdminSession: []
+      parameters:
+        - name: review_id
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/ReviewID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReviewResolveRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEmptyResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/admin/review-cases/{review_id}/reject:
+    post:
+      summary: Reject a review case
+      operationId: adminRejectReviewCase
+      security:
+        - AdminSession: []
+      parameters:
+        - name: review_id
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/ReviewID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReviewRejectRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEmptyResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/admin/invoices:
+    get:
+      summary: List invoices (admin)
+      operationId: adminListInvoices
+      security:
+        - AdminSession: []
+      parameters:
+        - name: merchant_id
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/MerchantID"
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/InvoiceStatus"
+        - name: external_order_id
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/Cursor"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkInvoicesResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/admin/invoices/{invoice_id}:
+    get:
+      summary: Get invoice (admin)
+      operationId: adminGetInvoice
+      security:
+        - AdminSession: []
+      parameters:
+        - name: invoice_id
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/InvoiceID"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkPublicInvoiceResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/admin/deposits:
+    get:
+      summary: List deposits (admin)
+      operationId: adminListDeposits
+      security:
+        - AdminSession: []
+      parameters:
+        - name: merchant_id
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/MerchantID"
+        - name: invoice_id
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/InvoiceID"
+        - name: txid
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/Cursor"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkDepositsResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/admin/events:
+    get:
+      summary: List outbound events (admin)
+      operationId: adminListEvents
+      security:
+        - AdminSession: []
+      parameters:
+        - name: merchant_id
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/MerchantID"
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/Cursor"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkEventsResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/admin/refunds:
+    post:
+      summary: Record a manual refund (no signing/broadcast)
+      operationId: adminCreateRefund
+      security:
+        - AdminSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefundCreateRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkRefundResponse"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    get:
+      summary: List refunds
+      operationId: adminListRefunds
+      security:
+        - AdminSession: []
+      parameters:
+        - name: merchant_id
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/MerchantID"
+        - name: invoice_id
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/InvoiceID"
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/RefundStatus"
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/Cursor"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkRefundsResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  securitySchemes:
+    MerchantApiKey:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+    AdminSession:
+      type: apiKey
+      in: cookie
+      name: juno_admin_session
+
+  schemas:
+    Chain:
+      type: string
+      enum: [mainnet, testnet, regtest]
+
+    Zat:
+      type: integer
+      format: int64
+      minimum: 0
+
+    Timestamp:
+      type: string
+      format: date-time
+
+    MerchantID:
+      type: string
+      minLength: 8
+      maxLength: 128
+
+    InvoiceID:
+      type: string
+      minLength: 8
+      maxLength: 128
+
+    ApiKeyID:
+      type: string
+      minLength: 8
+      maxLength: 128
+
+    EventSinkID:
+      type: string
+      minLength: 8
+      maxLength: 128
+
+    ReviewID:
+      type: string
+      minLength: 8
+      maxLength: 128
+
+    Cursor:
+      type: string
+      minLength: 1
+
+    AdminLoginRequest:
+      type: object
+      required: [password]
+      properties:
+        password:
+          type: string
+          minLength: 1
+
+    DemoAirPurchaseRequest:
+      type: object
+      description: Optional inputs for the demo checkout flow.
+      properties:
+        buyer_id:
+          type: string
+          maxLength: 256
+
+    OkEmptyResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          const: ok
+
+    OkHealthResponse:
+      type: object
+      required: [status, data]
+      properties:
+        status:
+          const: ok
+        data:
+          type: object
+          required: [healthy]
+          properties:
+            healthy:
+              type: boolean
+              const: true
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Stable, machine-readable code.
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+
+    ErrorResponse:
+      type: object
+      required: [status, error]
+      properties:
+        status:
+          const: error
+        error:
+          $ref: "#/components/schemas/Error"
+
+    Merchant:
+      type: object
+      required: [merchant_id, name, status, settings, created_at, updated_at]
+      properties:
+        merchant_id:
+          $ref: "#/components/schemas/MerchantID"
+        name:
+          type: string
+        status:
+          type: string
+          enum: [active, disabled]
+        settings:
+          $ref: "#/components/schemas/MerchantSettings"
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        updated_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    MerchantCreateRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        settings:
+          $ref: "#/components/schemas/MerchantSettings"
+
+    MerchantWallet:
+      type: object
+      required: [merchant_id, wallet_id, ufvk, chain, ua_hrp, coin_type, created_at]
+      properties:
+        merchant_id:
+          $ref: "#/components/schemas/MerchantID"
+        wallet_id:
+          type: string
+        ufvk:
+          type: string
+          description: Unified Full Viewing Key (watch-only).
+        chain:
+          $ref: "#/components/schemas/Chain"
+        ua_hrp:
+          type: string
+          description: Unified address HRP (e.g. "j", "jtest", "jregtest").
+        coin_type:
+          type: integer
+          format: int32
+          minimum: 0
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    MerchantWalletSetRequest:
+      type: object
+      required: [ufvk, chain, ua_hrp, coin_type]
+      properties:
+        wallet_id:
+          type: string
+          description: Optional override; otherwise server picks a deterministic ID.
+        ufvk:
+          type: string
+        chain:
+          $ref: "#/components/schemas/Chain"
+        ua_hrp:
+          type: string
+        coin_type:
+          type: integer
+          format: int32
+
+    MerchantApiKeyCreateRequest:
+      type: object
+      properties:
+        label:
+          type: string
+          maxLength: 128
+
+    MerchantApiKey:
+      type: object
+      required: [key_id, merchant_id, label, created_at]
+      properties:
+        key_id:
+          $ref: "#/components/schemas/ApiKeyID"
+        merchant_id:
+          $ref: "#/components/schemas/MerchantID"
+        label:
+          type: string
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        revoked_at:
+          anyOf:
+            - $ref: "#/components/schemas/Timestamp"
+            - type: "null"
+
+    MerchantApiKeyCreated:
+      type: object
+      required: [api_key, key]
+      properties:
+        api_key:
+          type: string
+          description: Plaintext API key (returned once).
+        key:
+          $ref: "#/components/schemas/MerchantApiKey"
+
+    InvoiceStatus:
+      type: string
+      enum: [open, partial, paid, overpaid, expired, paid_late, canceled]
+
+    LatePaymentPolicy:
+      type: string
+      enum: [mark_paid_late, manual_review, ignore]
+
+    PartialPaymentPolicy:
+      type: string
+      enum: [accept_partial, reject_partial]
+
+    OverpaymentPolicy:
+      type: string
+      enum: [mark_overpaid, manual_review]
+
+    InvoicePolicies:
+      type: object
+      properties:
+        late_payment_policy:
+          $ref: "#/components/schemas/LatePaymentPolicy"
+        partial_payment_policy:
+          $ref: "#/components/schemas/PartialPaymentPolicy"
+        overpayment_policy:
+          $ref: "#/components/schemas/OverpaymentPolicy"
+
+    MerchantSettings:
+      type: object
+      required:
+        - invoice_ttl_seconds
+        - required_confirmations
+        - policies
+      properties:
+        invoice_ttl_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Default invoice expiry window in seconds.
+
+            - `0` disables expiry (never expires).
+        required_confirmations:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Default confirmations required before considering a deposit confirmed for business logic.
+        policies:
+          $ref: "#/components/schemas/InvoicePolicies"
+
+    InvoiceCreateRequest:
+      type: object
+      required: [external_order_id, amount_zat]
+      properties:
+        external_order_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: |
+            Merchant-provided idempotency key (unique per merchant).
+
+            If the request is retried with the same `external_order_id`, the server returns the existing invoice (200).
+        amount_zat:
+          $ref: "#/components/schemas/Zat"
+        metadata:
+          type: object
+          additionalProperties: true
+
+    Invoice:
+      type: object
+      required:
+        - invoice_id
+        - merchant_id
+        - external_order_id
+        - status
+        - address
+        - amount_zat
+        - required_confirmations
+        - received_zat_pending
+        - received_zat_confirmed
+        - created_at
+        - updated_at
+      properties:
+        invoice_id:
+          $ref: "#/components/schemas/InvoiceID"
+        merchant_id:
+          $ref: "#/components/schemas/MerchantID"
+        external_order_id:
+          type: string
+        status:
+          $ref: "#/components/schemas/InvoiceStatus"
+        address:
+          type: string
+          description: Deposit address for this invoice.
+        amount_zat:
+          $ref: "#/components/schemas/Zat"
+        required_confirmations:
+          type: integer
+          format: int32
+          minimum: 0
+        received_zat_pending:
+          $ref: "#/components/schemas/Zat"
+        received_zat_confirmed:
+          $ref: "#/components/schemas/Zat"
+        expires_at:
+          anyOf:
+            - $ref: "#/components/schemas/Timestamp"
+            - type: "null"
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        updated_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    PublicInvoice:
+      type: object
+      required: [invoice, invoice_token]
+      properties:
+        invoice:
+          $ref: "#/components/schemas/Invoice"
+        invoice_token:
+          type: string
+          description: Secret token for public checkout access.
+
+    DepositRef:
+      type: object
+      required: [wallet_id, txid, action_index, amount_zat, height]
+      properties:
+        wallet_id:
+          type: string
+        txid:
+          type: string
+        action_index:
+          type: integer
+          format: int32
+          minimum: 0
+        amount_zat:
+          $ref: "#/components/schemas/Zat"
+        height:
+          type: integer
+          format: int64
+          minimum: 0
+
+    DepositStatus:
+      type: string
+      enum: [detected, confirmed, unconfirmed, orphaned]
+
+    Deposit:
+      type: object
+      required: [wallet_id, txid, action_index, recipient_address, amount_zat, height, status, detected_at, updated_at]
+      properties:
+        wallet_id:
+          type: string
+        txid:
+          type: string
+        action_index:
+          type: integer
+          format: int32
+          minimum: 0
+        recipient_address:
+          type: string
+        amount_zat:
+          $ref: "#/components/schemas/Zat"
+        height:
+          type: integer
+          format: int64
+          minimum: 0
+        status:
+          $ref: "#/components/schemas/DepositStatus"
+        confirmed_height:
+          anyOf:
+            - type: integer
+              format: int64
+              minimum: 0
+            - type: "null"
+        invoice_id:
+          anyOf:
+            - $ref: "#/components/schemas/InvoiceID"
+            - type: "null"
+        detected_at:
+          $ref: "#/components/schemas/Timestamp"
+        updated_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    CloudEvent:
+      type: object
+      required: [specversion, id, source, type, time, datacontenttype, data]
+      properties:
+        specversion:
+          type: string
+          const: "1.0"
+        id:
+          type: string
+        source:
+          type: string
+          description: Event source identifier (e.g. "juno-pay-server").
+        type:
+          type: string
+          description: Event type (e.g. "invoice.paid").
+        subject:
+          type: string
+          description: Optional subject (e.g. "invoice/{invoice_id}").
+        time:
+          $ref: "#/components/schemas/Timestamp"
+        datacontenttype:
+          type: string
+          const: application/json
+        data:
+          type: object
+          additionalProperties: true
+
+    InvoiceEventType:
+      type: string
+      enum:
+        - invoice.created
+        - invoice.expired
+        - deposit.detected
+        - deposit.confirmed
+        - invoice.paid
+        - invoice.overpaid
+        - refund.requested
+        - refund.sent
+
+    InvoiceEvent:
+      type: object
+      required: [event_id, type, occurred_at, invoice_id]
+      properties:
+        event_id:
+          type: string
+        type:
+          $ref: "#/components/schemas/InvoiceEventType"
+        occurred_at:
+          $ref: "#/components/schemas/Timestamp"
+        invoice_id:
+          $ref: "#/components/schemas/InvoiceID"
+        deposit:
+          anyOf:
+            - $ref: "#/components/schemas/DepositRef"
+            - type: "null"
+        refund:
+          anyOf:
+            - $ref: "#/components/schemas/Refund"
+            - type: "null"
+
+    EventSinkKind:
+      type: string
+      enum: [webhook, kafka, nats, rabbitmq]
+
+    EventSinkStatus:
+      type: string
+      enum: [active, disabled]
+
+    EventSink:
+      type: object
+      required: [sink_id, merchant_id, kind, status, created_at, updated_at]
+      properties:
+        sink_id:
+          $ref: "#/components/schemas/EventSinkID"
+        merchant_id:
+          $ref: "#/components/schemas/MerchantID"
+        kind:
+          $ref: "#/components/schemas/EventSinkKind"
+        status:
+          $ref: "#/components/schemas/EventSinkStatus"
+        config:
+          type: object
+          additionalProperties: true
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        updated_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    EventSinkCreateRequest:
+      type: object
+      required: [merchant_id, kind, config]
+      properties:
+        merchant_id:
+          $ref: "#/components/schemas/MerchantID"
+        kind:
+          $ref: "#/components/schemas/EventSinkKind"
+        config:
+          type: object
+          additionalProperties: true
+          description: Kind-specific config (webhook URL/secret, broker topic/subject, etc.).
+
+    EventDeliveryStatus:
+      type: string
+      enum: [pending, delivered, failed]
+
+    EventDelivery:
+      type: object
+      required: [delivery_id, sink_id, event_id, status, attempt, created_at, updated_at]
+      properties:
+        delivery_id:
+          type: string
+        sink_id:
+          $ref: "#/components/schemas/EventSinkID"
+        event_id:
+          type: string
+        status:
+          $ref: "#/components/schemas/EventDeliveryStatus"
+        attempt:
+          type: integer
+          format: int32
+          minimum: 0
+        next_retry_at:
+          anyOf:
+            - $ref: "#/components/schemas/Timestamp"
+            - type: "null"
+        last_error:
+          anyOf:
+            - type: string
+            - type: "null"
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        updated_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    RefundStatus:
+      type: string
+      enum: [requested, sent, canceled]
+
+    Refund:
+      type: object
+      required: [refund_id, merchant_id, status, to_address, amount_zat, created_at, updated_at]
+      properties:
+        refund_id:
+          type: string
+        merchant_id:
+          $ref: "#/components/schemas/MerchantID"
+        invoice_id:
+          anyOf:
+            - $ref: "#/components/schemas/InvoiceID"
+            - type: "null"
+        external_refund_id:
+          anyOf:
+            - type: string
+            - type: "null"
+        to_address:
+          type: string
+        amount_zat:
+          $ref: "#/components/schemas/Zat"
+        status:
+          $ref: "#/components/schemas/RefundStatus"
+        sent_txid:
+          anyOf:
+            - type: string
+            - type: "null"
+        notes:
+          type: string
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        updated_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    RefundCreateRequest:
+      type: object
+      required: [merchant_id, to_address, amount_zat]
+      properties:
+        merchant_id:
+          $ref: "#/components/schemas/MerchantID"
+        invoice_id:
+          $ref: "#/components/schemas/InvoiceID"
+        external_refund_id:
+          type: string
+          maxLength: 128
+        to_address:
+          type: string
+        amount_zat:
+          $ref: "#/components/schemas/Zat"
+        sent_txid:
+          type: string
+        notes:
+          type: string
+          maxLength: 4096
+
+    ReviewStatus:
+      type: string
+      enum: [open, resolved, rejected]
+
+    ReviewReason:
+      type: string
+      enum:
+        - late_payment
+        - partial_payment
+        - overpayment
+        - unknown_address
+        - reorg
+        - manual_refund
+
+    ReviewCase:
+      type: object
+      required: [review_id, merchant_id, reason, status, created_at, updated_at]
+      properties:
+        review_id:
+          $ref: "#/components/schemas/ReviewID"
+        merchant_id:
+          $ref: "#/components/schemas/MerchantID"
+        invoice_id:
+          anyOf:
+            - $ref: "#/components/schemas/InvoiceID"
+            - type: "null"
+        reason:
+          $ref: "#/components/schemas/ReviewReason"
+        status:
+          $ref: "#/components/schemas/ReviewStatus"
+        notes:
+          type: string
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        updated_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    ReviewResolveRequest:
+      type: object
+      required: [notes]
+      properties:
+        notes:
+          type: string
+          maxLength: 4096
+
+    ReviewRejectRequest:
+      type: object
+      required: [notes]
+      properties:
+        notes:
+          type: string
+          maxLength: 4096
+
+    StatusSnapshot:
+      type: object
+      required: [chain, scanner, event_delivery]
+      properties:
+        chain:
+          type: object
+          required: [best_height, best_hash, uptime_seconds]
+          properties:
+            best_height:
+              type: integer
+              format: int64
+              minimum: 0
+            best_hash:
+              type: string
+            uptime_seconds:
+              type: integer
+              format: int64
+              minimum: 0
+        scanner:
+          type: object
+          required: [connected, last_cursor_applied]
+          properties:
+            connected:
+              type: boolean
+            last_cursor_applied:
+              type: integer
+              format: int64
+              minimum: 0
+            last_event_at:
+              anyOf:
+                - $ref: "#/components/schemas/Timestamp"
+                - type: "null"
+        event_delivery:
+          type: object
+          required: [pending_deliveries]
+          properties:
+            pending_deliveries:
+              type: integer
+              format: int64
+              minimum: 0
+
+    AdminStatusSnapshot:
+      allOf:
+        - $ref: "#/components/schemas/StatusSnapshot"
+        - type: object
+          required: [restarts]
+          properties:
+            restarts:
+              type: object
+              required: [junocashd_restarts_detected]
+              properties:
+                junocashd_restarts_detected:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                last_restart_at:
+                  anyOf:
+                    - $ref: "#/components/schemas/Timestamp"
+                    - type: "null"
+
+    OkStatusResponse:
+      type: object
+      required: [status, data]
+      properties:
+        status:
+          const: ok
+        data:
+          $ref: "#/components/schemas/StatusSnapshot"
+
+    OkAdminStatusResponse:
+      type: object
+      required: [status, data]
+      properties:
+        status:
+          const: ok
+        data:
+          $ref: "#/components/schemas/AdminStatusSnapshot"
+
+    OkMerchantResponse:
+      type: object
+      required: [status, data]
+      properties:
+        status:
+          const: ok
+        data:
+          $ref: "#/components/schemas/Merchant"
+
+    OkMerchantsResponse:
+      type: object
+      required: [status, data]
+      properties:
+        status:
+          const: ok
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Merchant"
+
+    OkMerchantWalletResponse:
+      type: object
+      required: [status, data]
+      properties:
+        status:
+          const: ok
+        data:
+          $ref: "#/components/schemas/MerchantWallet"
+
+    OkMerchantApiKeyCreatedResponse:
+      type: object
+      required: [status, data]
+      properties:
+        status:
+          const: ok
+        data:
+          $ref: "#/components/schemas/MerchantApiKeyCreated"
+
+    OkInvoiceResponse:
+      type: object
+      required: [status, data]
+      properties:
+        status:
+          const: ok
+        data:
+          $ref: "#/components/schemas/PublicInvoice"
+
+    OkPublicInvoiceResponse:
+      type: object
+      required: [status, data]
+      properties:
+        status:
+          const: ok
+        data:
+          $ref: "#/components/schemas/Invoice"
+
+    OkInvoiceEventsResponse:
+      type: object
+      required: [status, data]
+      properties:
+        status:
+          const: ok
+        data:
+          type: object
+          required: [events, next_cursor]
+          properties:
+            events:
+              type: array
+              items:
+                $ref: "#/components/schemas/InvoiceEvent"
+            next_cursor:
+              $ref: "#/components/schemas/Cursor"
+
+    OkInvoicesResponse:
+      type: object
+      required: [status, data]
+      properties:
+        status:
+          const: ok
+        data:
+          type: object
+          required: [invoices, next_cursor]
+          properties:
+            invoices:
+              type: array
+              items:
+                $ref: "#/components/schemas/Invoice"
+            next_cursor:
+              $ref: "#/components/schemas/Cursor"
+
+    OkDepositsResponse:
+      type: object
+      required: [status, data]
+      properties:
+        status:
+          const: ok
+        data:
+          type: object
+          required: [deposits, next_cursor]
+          properties:
+            deposits:
+              type: array
+              items:
+                $ref: "#/components/schemas/Deposit"
+            next_cursor:
+              $ref: "#/components/schemas/Cursor"
+
+    OkEventsResponse:
+      type: object
+      required: [status, data]
+      properties:
+        status:
+          const: ok
+        data:
+          type: object
+          required: [events, next_cursor]
+          properties:
+            events:
+              type: array
+              items:
+                $ref: "#/components/schemas/CloudEvent"
+            next_cursor:
+              $ref: "#/components/schemas/Cursor"
+
+    OkEventSinkResponse:
+      type: object
+      required: [status, data]
+      properties:
+        status:
+          const: ok
+        data:
+          $ref: "#/components/schemas/EventSink"
+
+    OkEventSinksResponse:
+      type: object
+      required: [status, data]
+      properties:
+        status:
+          const: ok
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/EventSink"
+
+    OkEventDeliveriesResponse:
+      type: object
+      required: [status, data]
+      properties:
+        status:
+          const: ok
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/EventDelivery"
+
+    OkRefundResponse:
+      type: object
+      required: [status, data]
+      properties:
+        status:
+          const: ok
+        data:
+          $ref: "#/components/schemas/Refund"
+
+    OkRefundsResponse:
+      type: object
+      required: [status, data]
+      properties:
+        status:
+          const: ok
+        data:
+          type: object
+          required: [refunds, next_cursor]
+          properties:
+            refunds:
+              type: array
+              items:
+                $ref: "#/components/schemas/Refund"
+            next_cursor:
+              $ref: "#/components/schemas/Cursor"
+
+    OkReviewCasesResponse:
+      type: object
+      required: [status, data]
+      properties:
+        status:
+          const: ok
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReviewCase"

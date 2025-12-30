@@ -1,0 +1,10 @@
+# Local-only
+/AGENTS.md
+/tmp/
+/tmp-*/
+/bin/
+/.cache/
+*.sqlite
+
+# OS
+.DS_Store
