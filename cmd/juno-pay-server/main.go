@@ -9,12 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Abdullah1738/juno-pay-server/internal/api"
 	"github.com/Abdullah1738/juno-pay-server/internal/ingest"
 	"github.com/Abdullah1738/juno-pay-server/internal/keys"
 	"github.com/Abdullah1738/juno-pay-server/internal/keys/ffi"
+	"github.com/Abdullah1738/juno-pay-server/internal/outbox"
 	"github.com/Abdullah1738/juno-pay-server/internal/scanclient"
 	"github.com/Abdullah1738/juno-pay-server/internal/store/sqlite"
 	"github.com/Abdullah1738/juno-sdk-go/junocashd"
@@ -81,6 +83,22 @@ func main() {
 		}
 	}()
 
+	outboxPoll := parsePollInterval(getenv("JUNO_PAY_OUTBOX_POLL_MS", "500"))
+	outboxBatchSize := parseIntClamp(getenv("JUNO_PAY_OUTBOX_BATCH_SIZE", "100"), 1, 1000)
+	outboxMaxAttempts := int32(parseIntClamp(getenv("JUNO_PAY_OUTBOX_MAX_ATTEMPTS", "25"), 1, 1000))
+	ob, err := outbox.New(st, outbox.WithBatchSize(outboxBatchSize), outbox.WithMaxAttempts(outboxMaxAttempts))
+	if err != nil {
+		log.Fatalf("init outbox: %v", err)
+	}
+	go func() {
+		for {
+			if err := ob.Sync(context.Background()); err != nil {
+				log.Printf("outbox sync error: %v", err)
+			}
+			time.Sleep(outboxPoll)
+		}
+	}()
+
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           s.Handler(),
@@ -119,6 +137,20 @@ func parsePollInterval(ms string) time.Duration {
 		n = 60000
 	}
 	return time.Duration(n) * time.Millisecond
+}
+
+func parseIntClamp(v string, min, max int) int {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil {
+		return min
+	}
+	if n < min {
+		return min
+	}
+	if n > max {
+		return max
+	}
+	return n
 }
 
 type keysDeriver struct{ d keys.Deriver }
