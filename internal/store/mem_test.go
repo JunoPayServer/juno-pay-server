@@ -191,3 +191,93 @@ func TestMemStore_CreateInvoice_AddressUniquePerWallet(t *testing.T) {
 	}
 }
 
+func TestMemStore_APIKey_Lifecycle(t *testing.T) {
+	st := NewMem()
+	ctx := context.Background()
+
+	m, err := st.CreateMerchant(ctx, "acme", domain.MerchantSettings{
+		InvoiceTTLSeconds:     0,
+		RequiredConfirmations: 0,
+		Policies: domain.InvoicePolicies{
+			LatePayment:    domain.LatePaymentMarkPaidLate,
+			PartialPayment: domain.PartialPaymentAccept,
+			Overpayment:    domain.OverpaymentMarkOverpaid,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateMerchant: %v", err)
+	}
+
+	keyID, apiKey, err := st.CreateMerchantAPIKey(ctx, m.MerchantID, "default")
+	if err != nil {
+		t.Fatalf("CreateMerchantAPIKey: %v", err)
+	}
+	if keyID == "" || apiKey == "" {
+		t.Fatalf("expected keyID and apiKey")
+	}
+
+	merchantID, ok, err := st.LookupMerchantIDByAPIKey(ctx, apiKey)
+	if err != nil {
+		t.Fatalf("LookupMerchantIDByAPIKey: %v", err)
+	}
+	if !ok || merchantID != m.MerchantID {
+		t.Fatalf("expected api key to resolve to merchant")
+	}
+
+	if err := st.RevokeMerchantAPIKey(ctx, keyID); err != nil {
+		t.Fatalf("RevokeMerchantAPIKey: %v", err)
+	}
+	_, ok, err = st.LookupMerchantIDByAPIKey(ctx, apiKey)
+	if err != nil {
+		t.Fatalf("LookupMerchantIDByAPIKey after revoke: %v", err)
+	}
+	if ok {
+		t.Fatalf("expected revoked api key to be invalid")
+	}
+}
+
+func TestMemStore_InvoiceToken(t *testing.T) {
+	st := NewMem()
+	ctx := context.Background()
+
+	m, err := st.CreateMerchant(ctx, "acme", domain.MerchantSettings{
+		InvoiceTTLSeconds:     0,
+		RequiredConfirmations: 0,
+		Policies: domain.InvoicePolicies{
+			LatePayment:    domain.LatePaymentMarkPaidLate,
+			PartialPayment: domain.PartialPaymentAccept,
+			Overpayment:    domain.OverpaymentMarkOverpaid,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateMerchant: %v", err)
+	}
+
+	inv, _, err := st.CreateInvoice(ctx, InvoiceCreate{
+		MerchantID:      m.MerchantID,
+		ExternalOrderID: "order-1",
+		WalletID:        "w1",
+		AddressIndex:    0,
+		Address:         "j1abc",
+		AmountZat:       10,
+		Policies: domain.InvoicePolicies{
+			LatePayment:    domain.LatePaymentMarkPaidLate,
+			PartialPayment: domain.PartialPaymentAccept,
+			Overpayment:    domain.OverpaymentMarkOverpaid,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateInvoice: %v", err)
+	}
+
+	if err := st.PutInvoiceToken(ctx, inv.InvoiceID, "tok"); err != nil {
+		t.Fatalf("PutInvoiceToken: %v", err)
+	}
+	tok, ok, err := st.GetInvoiceToken(ctx, inv.InvoiceID)
+	if err != nil {
+		t.Fatalf("GetInvoiceToken: %v", err)
+	}
+	if !ok || tok != "tok" {
+		t.Fatalf("unexpected token result")
+	}
+}

@@ -2,6 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
@@ -22,6 +25,20 @@ type MemStore struct {
 	invoices          map[string]domain.Invoice
 	invoiceByExternal map[string]map[string]string // merchant_id -> external_order_id -> invoice_id
 	invoiceByAddress  map[string]string            // wallet_id + "|" + address -> invoice_id
+
+	invoiceToken map[string]string // invoice_id -> token (plaintext; tests/dev only)
+
+	apiKeySeq   int64
+	apiKeysByID map[string]apiKeyRecord
+	apiKeysByHash map[string]string // sha256(token) hex -> key_id
+}
+
+type apiKeyRecord struct {
+	KeyID      string
+	MerchantID string
+	Label      string
+	RevokedAt  *time.Time
+	CreatedAt  time.Time
 }
 
 func NewMem() *MemStore {
@@ -31,6 +48,9 @@ func NewMem() *MemStore {
 		invoices:         make(map[string]domain.Invoice),
 		invoiceByExternal: make(map[string]map[string]string),
 		invoiceByAddress: make(map[string]string),
+		invoiceToken:     make(map[string]string),
+		apiKeysByID:      make(map[string]apiKeyRecord),
+		apiKeysByHash:    make(map[string]string),
 	}
 }
 
@@ -137,6 +157,85 @@ func (s *MemStore) GetMerchantWallet(_ context.Context, merchantID string) (Merc
 	return w, ok, nil
 }
 
+func (s *MemStore) CreateMerchantAPIKey(_ context.Context, merchantID, label string) (keyID string, apiKey string, err error) {
+	merchantID = strings.TrimSpace(merchantID)
+	label = strings.TrimSpace(label)
+	if merchantID == "" {
+		return "", "", domain.NewError(domain.ErrInvalidArgument, "merchant_id is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.merchants[merchantID]; !ok {
+		return "", "", ErrNotFound
+	}
+
+	s.apiKeySeq++
+	keyID = fmt.Sprintf("key_%016x", s.apiKeySeq)
+
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", "", err
+	}
+	apiKey = "jps_" + hex.EncodeToString(raw[:])
+
+	sum := sha256.Sum256([]byte(apiKey))
+	hashHex := hex.EncodeToString(sum[:])
+	s.apiKeysByHash[hashHex] = keyID
+
+	now := time.Now().UTC()
+	s.apiKeysByID[keyID] = apiKeyRecord{
+		KeyID:      keyID,
+		MerchantID: merchantID,
+		Label:      label,
+		CreatedAt:  now,
+	}
+
+	return keyID, apiKey, nil
+}
+
+func (s *MemStore) RevokeMerchantAPIKey(_ context.Context, keyID string) error {
+	keyID = strings.TrimSpace(keyID)
+	if keyID == "" {
+		return domain.NewError(domain.ErrInvalidArgument, "key_id is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.apiKeysByID[keyID]
+	if !ok {
+		return ErrNotFound
+	}
+	now := time.Now().UTC()
+	rec.RevokedAt = &now
+	s.apiKeysByID[keyID] = rec
+	return nil
+}
+
+func (s *MemStore) LookupMerchantIDByAPIKey(_ context.Context, apiKey string) (merchantID string, ok bool, err error) {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return "", false, nil
+	}
+	sum := sha256.Sum256([]byte(apiKey))
+	hashHex := hex.EncodeToString(sum[:])
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	keyID, ok := s.apiKeysByHash[hashHex]
+	if !ok {
+		return "", false, nil
+	}
+	rec, ok := s.apiKeysByID[keyID]
+	if !ok {
+		return "", false, nil
+	}
+	if rec.RevokedAt != nil {
+		return "", false, nil
+	}
+	return rec.MerchantID, true, nil
+}
+
 func (s *MemStore) CreateInvoice(_ context.Context, req InvoiceCreate) (domain.Invoice, bool, error) {
 	req.MerchantID = strings.TrimSpace(req.MerchantID)
 	req.ExternalOrderID = strings.TrimSpace(req.ExternalOrderID)
@@ -236,3 +335,29 @@ func (s *MemStore) FindInvoiceByExternalOrderID(_ context.Context, merchantID, e
 	return inv, ok, nil
 }
 
+func (s *MemStore) PutInvoiceToken(_ context.Context, invoiceID string, token string) error {
+	invoiceID = strings.TrimSpace(invoiceID)
+	if invoiceID == "" {
+		return domain.NewError(domain.ErrInvalidArgument, "invoice_id is required")
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return domain.NewError(domain.ErrInvalidArgument, "token is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.invoices[invoiceID]; !ok {
+		return ErrNotFound
+	}
+	s.invoiceToken[invoiceID] = token
+	return nil
+}
+
+func (s *MemStore) GetInvoiceToken(_ context.Context, invoiceID string) (token string, ok bool, err error) {
+	invoiceID = strings.TrimSpace(invoiceID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	token, ok = s.invoiceToken[invoiceID]
+	return token, ok, nil
+}

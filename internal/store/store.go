@@ -53,9 +53,17 @@ type Store interface {
 	SetMerchantWallet(ctx context.Context, merchantID string, w MerchantWallet) (MerchantWallet, error)
 	GetMerchantWallet(ctx context.Context, merchantID string) (MerchantWallet, bool, error)
 
+	// Merchant API keys (for invoice creation only)
+	CreateMerchantAPIKey(ctx context.Context, merchantID, label string) (keyID string, apiKey string, err error)
+	RevokeMerchantAPIKey(ctx context.Context, keyID string) error
+	LookupMerchantIDByAPIKey(ctx context.Context, apiKey string) (merchantID string, ok bool, err error)
+
 	// Invoices (idempotent by merchant_id + external_order_id)
 	CreateInvoice(ctx context.Context, req InvoiceCreate) (domain.Invoice, bool, error)
 	GetInvoice(ctx context.Context, invoiceID string) (domain.Invoice, bool, error)
 	FindInvoiceByExternalOrderID(ctx context.Context, merchantID, externalOrderID string) (domain.Invoice, bool, error)
-}
 
+	// Invoice checkout token (stored encrypted-at-rest in production DB).
+	PutInvoiceToken(ctx context.Context, invoiceID string, token string) error
+	GetInvoiceToken(ctx context.Context, invoiceID string) (token string, ok bool, err error)
+}
