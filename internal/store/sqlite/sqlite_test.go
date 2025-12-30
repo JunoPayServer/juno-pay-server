@@ -459,6 +459,117 @@ func TestStore_ListDeposits_FilterAndCursor(t *testing.T) {
 	}
 }
 
+func TestStore_Refunds_CreateListAndInvoiceEvents(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	m, err := s.CreateMerchant(ctx, "acme", domain.MerchantSettings{
+		InvoiceTTLSeconds:     0,
+		RequiredConfirmations: 0,
+		Policies: domain.InvoicePolicies{
+			LatePayment:    domain.LatePaymentMarkPaidLate,
+			PartialPayment: domain.PartialPaymentAccept,
+			Overpayment:    domain.OverpaymentMarkOverpaid,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateMerchant: %v", err)
+	}
+
+	inv, _, err := s.CreateInvoice(ctx, store.InvoiceCreate{
+		MerchantID:            m.MerchantID,
+		ExternalOrderID:       "order-1",
+		WalletID:              "w1",
+		AddressIndex:          0,
+		Address:               "j1a",
+		CreatedAfterHeight:    0,
+		CreatedAfterHash:      "h0",
+		AmountZat:             10,
+		RequiredConfirmations: 0,
+		Policies: domain.InvoicePolicies{
+			LatePayment:    domain.LatePaymentManualReview,
+			PartialPayment: domain.PartialPaymentAccept,
+			Overpayment:    domain.OverpaymentManualReview,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateInvoice: %v", err)
+	}
+
+	r1, err := s.CreateRefund(ctx, store.RefundCreate{
+		MerchantID: m.MerchantID,
+		InvoiceID:  inv.InvoiceID,
+		ToAddress:  "j1dest",
+		AmountZat:  1,
+		Notes:      "n1",
+	})
+	if err != nil {
+		t.Fatalf("CreateRefund r1: %v", err)
+	}
+	if r1.Status != domain.RefundRequested {
+		t.Fatalf("expected requested status")
+	}
+
+	r2, err := s.CreateRefund(ctx, store.RefundCreate{
+		MerchantID: m.MerchantID,
+		InvoiceID:  inv.InvoiceID,
+		ToAddress:  "j1dest2",
+		AmountZat:  2,
+		SentTxID:   "txsent",
+	})
+	if err != nil {
+		t.Fatalf("CreateRefund r2: %v", err)
+	}
+	if r2.Status != domain.RefundSent {
+		t.Fatalf("expected sent status")
+	}
+
+	refunds, _, err := s.ListRefunds(ctx, store.RefundFilter{MerchantID: m.MerchantID, AfterID: 0, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListRefunds: %v", err)
+	}
+	if len(refunds) != 2 {
+		t.Fatalf("expected 2 refunds")
+	}
+
+	events, _, err := s.ListInvoiceEvents(ctx, inv.InvoiceID, 0, 100)
+	if err != nil {
+		t.Fatalf("ListInvoiceEvents: %v", err)
+	}
+	var gotRequested, gotSent int
+	for _, e := range events {
+		switch e.Type {
+		case domain.InvoiceEventRefundRequested:
+			gotRequested++
+			if e.Refund == nil || e.Refund.RefundID != r1.RefundID {
+				t.Fatalf("expected refund.requested to include r1")
+			}
+		case domain.InvoiceEventRefundSent:
+			gotSent++
+			if e.Refund == nil || e.Refund.RefundID != r2.RefundID {
+				t.Fatalf("expected refund.sent to include r2")
+			}
+		}
+	}
+	if gotRequested != 1 || gotSent != 1 {
+		t.Fatalf("expected refund events requested=1 sent=1, got requested=%d sent=%d", gotRequested, gotSent)
+	}
+
+	outbox, _, err := s.ListOutboundEvents(ctx, m.MerchantID, 0, 100)
+	if err != nil {
+		t.Fatalf("ListOutboundEvents: %v", err)
+	}
+	var outboxRefunds int
+	for _, e := range outbox {
+		if e.Type == string(domain.InvoiceEventRefundRequested) || e.Type == string(domain.InvoiceEventRefundSent) {
+			outboxRefunds++
+		}
+	}
+	if outboxRefunds != 2 {
+		t.Fatalf("expected 2 refund events in outbox, got %d", outboxRefunds)
+	}
+}
+
 func TestStore_OutboxFromInvoiceEvents(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

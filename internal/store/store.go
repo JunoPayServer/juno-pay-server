@@ -61,6 +61,26 @@ type DepositFilter struct {
 	Limit   int
 }
 
+type RefundCreate struct {
+	MerchantID string
+	InvoiceID  string
+
+	ExternalRefundID string
+	ToAddress        string
+	AmountZat        int64
+	SentTxID         string
+	Notes            string
+}
+
+type RefundFilter struct {
+	MerchantID string
+	InvoiceID  string
+	Status     domain.RefundStatus
+
+	AfterID int64
+	Limit   int
+}
+
 type ScanEvent struct {
 	WalletID   string
 	Cursor     int64
@@ -126,6 +146,10 @@ type Store interface {
 
 	// Deposits (debug/admin).
 	ListDeposits(ctx context.Context, f DepositFilter) (deposits []domain.Deposit, nextCursor int64, err error)
+
+	// Refunds (manual recordkeeping; no signing/broadcast).
+	CreateRefund(ctx context.Context, req RefundCreate) (domain.Refund, error)
+	ListRefunds(ctx context.Context, f RefundFilter) (refunds []domain.Refund, nextCursor int64, err error)
 
 	// Outbound events (webhook/brokers) + sinks.
 	CreateEventSink(ctx context.Context, req EventSinkCreate) (domain.EventSink, error)

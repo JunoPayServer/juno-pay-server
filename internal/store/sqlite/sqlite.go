@@ -157,6 +157,22 @@ func (s *Store) Init(ctx context.Context) error {
 			PRIMARY KEY (wallet_id, txid, action_index)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_deposits_invoice_status ON deposits(invoice_id, status)`,
+		`CREATE TABLE IF NOT EXISTS refunds (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			refund_id TEXT NOT NULL UNIQUE,
+			merchant_id TEXT NOT NULL,
+			invoice_id TEXT,
+			external_refund_id TEXT,
+			to_address TEXT NOT NULL,
+			amount_zat INTEGER NOT NULL,
+			status TEXT NOT NULL,
+			sent_txid TEXT,
+			notes TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_refunds_merchant_id ON refunds(merchant_id, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_refunds_invoice_id ON refunds(invoice_id, id)`,
 		`CREATE TABLE IF NOT EXISTS invoice_events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			invoice_id TEXT NOT NULL,
@@ -167,11 +183,14 @@ func (s *Store) Init(ctx context.Context) error {
 			deposit_action_index INTEGER,
 			deposit_amount_zat INTEGER,
 			deposit_height INTEGER,
+			refund_id TEXT,
 			created_at INTEGER NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_invoice_events_invoice_id ON invoice_events(invoice_id, id)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_invoice_events_deposit_unique
 		 ON invoice_events(invoice_id, type, deposit_wallet_id, deposit_txid, deposit_action_index)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_invoice_events_refund_unique
+		 ON invoice_events(invoice_id, type, refund_id)`,
 		`CREATE TABLE IF NOT EXISTS event_sinks (
 			sink_id TEXT PRIMARY KEY,
 			merchant_id TEXT NOT NULL,
@@ -713,7 +732,7 @@ func (s *Store) CreateInvoice(ctx context.Context, req store.InvoiceCreate) (dom
 		nowUnix, nowUnix,
 	)
 	if err == nil {
-		if err := s.insertInvoiceEventTx(ctx, tx, id, domain.InvoiceEventInvoiceCreated, now, nil); err != nil {
+		if err := s.insertInvoiceEventTx(ctx, tx, id, domain.InvoiceEventInvoiceCreated, now, nil, nil); err != nil {
 			return domain.Invoice{}, false, err
 		}
 		if err := tx.Commit(); err != nil {
@@ -1071,11 +1090,13 @@ func (s *Store) ListInvoiceEvents(ctx context.Context, invoiceID string, afterID
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, type, occurred_at,
-		       deposit_wallet_id, deposit_txid, deposit_action_index, deposit_amount_zat, deposit_height
-		FROM invoice_events
-		WHERE invoice_id = ? AND id > ?
-		ORDER BY id
+		SELECT ie.id, ie.type, ie.occurred_at,
+		       ie.deposit_wallet_id, ie.deposit_txid, ie.deposit_action_index, ie.deposit_amount_zat, ie.deposit_height,
+		       r.refund_id, r.merchant_id, r.invoice_id, r.external_refund_id, r.to_address, r.amount_zat, r.status, r.sent_txid, r.notes, r.created_at, r.updated_at
+		FROM invoice_events ie
+		LEFT JOIN refunds r ON r.refund_id = ie.refund_id
+		WHERE ie.invoice_id = ? AND ie.id > ?
+		ORDER BY ie.id
 		LIMIT ?
 	`, invoiceID, afterID, limit)
 	if err != nil {
@@ -1093,8 +1114,23 @@ func (s *Store) ListInvoiceEvents(ctx context.Context, invoiceID string, afterID
 			depActionIndex sql.NullInt64
 			depAmountZat   sql.NullInt64
 			depHeight      sql.NullInt64
+			refundID       sql.NullString
+			refundMerchant sql.NullString
+			refundInvoice  sql.NullString
+			refundExternal sql.NullString
+			refundToAddr   sql.NullString
+			refundAmount   sql.NullInt64
+			refundStatus   sql.NullString
+			refundSentTxID sql.NullString
+			refundNotes    sql.NullString
+			refundCreated  sql.NullInt64
+			refundUpdated  sql.NullInt64
 		)
-		if err := rows.Scan(&id, &typ, &occurredAtUnix, &depWalletID, &depTxID, &depActionIndex, &depAmountZat, &depHeight); err != nil {
+		if err := rows.Scan(
+			&id, &typ, &occurredAtUnix,
+			&depWalletID, &depTxID, &depActionIndex, &depAmountZat, &depHeight,
+			&refundID, &refundMerchant, &refundInvoice, &refundExternal, &refundToAddr, &refundAmount, &refundStatus, &refundSentTxID, &refundNotes, &refundCreated, &refundUpdated,
+		); err != nil {
 			return nil, 0, err
 		}
 
@@ -1109,12 +1145,46 @@ func (s *Store) ListInvoiceEvents(ctx context.Context, invoiceID string, afterID
 			}
 		}
 
+		var refund *domain.Refund
+		if refundID.Valid && strings.TrimSpace(refundID.String) != "" {
+			var invID *string
+			if refundInvoice.Valid && strings.TrimSpace(refundInvoice.String) != "" {
+				v := refundInvoice.String
+				invID = &v
+			}
+			var extID *string
+			if refundExternal.Valid && strings.TrimSpace(refundExternal.String) != "" {
+				v := refundExternal.String
+				extID = &v
+			}
+			var sentTxID *string
+			if refundSentTxID.Valid && strings.TrimSpace(refundSentTxID.String) != "" {
+				v := refundSentTxID.String
+				sentTxID = &v
+			}
+
+			refund = &domain.Refund{
+				RefundID:         refundID.String,
+				MerchantID:       refundMerchant.String,
+				InvoiceID:        invID,
+				ExternalRefundID: extID,
+				ToAddress:        refundToAddr.String,
+				AmountZat:        refundAmount.Int64,
+				Status:           domain.RefundStatus(refundStatus.String),
+				SentTxID:         sentTxID,
+				Notes:            refundNotes.String,
+				CreatedAt:        time.Unix(refundCreated.Int64, 0).UTC(),
+				UpdatedAt:        time.Unix(refundUpdated.Int64, 0).UTC(),
+			}
+		}
+
 		events = append(events, domain.InvoiceEvent{
 			EventID:    strconv.FormatInt(id, 10),
 			Type:       domain.InvoiceEventType(typ),
 			OccurredAt: time.Unix(occurredAtUnix, 0).UTC(),
 			InvoiceID:  invoiceID,
 			Deposit:    dep,
+			Refund:     refund,
 		})
 		nextCursor = id
 	}
@@ -1216,6 +1286,236 @@ func (s *Store) ListDeposits(ctx context.Context, f store.DepositFilter) (deposi
 			ConfirmedHeight:  confirmedHeight,
 			InvoiceID:        invID,
 			DetectedAt:       time.Unix(detectedAt, 0).UTC(),
+			UpdatedAt:        time.Unix(updatedAt, 0).UTC(),
+		})
+		next = seq
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return out, next, nil
+}
+
+func (s *Store) CreateRefund(ctx context.Context, req store.RefundCreate) (domain.Refund, error) {
+	req.MerchantID = strings.TrimSpace(req.MerchantID)
+	req.InvoiceID = strings.TrimSpace(req.InvoiceID)
+	req.ExternalRefundID = strings.TrimSpace(req.ExternalRefundID)
+	req.ToAddress = strings.TrimSpace(req.ToAddress)
+	req.SentTxID = strings.TrimSpace(req.SentTxID)
+	req.Notes = strings.TrimSpace(req.Notes)
+	if req.MerchantID == "" {
+		return domain.Refund{}, domain.NewError(domain.ErrInvalidArgument, "merchant_id is required")
+	}
+	if req.ToAddress == "" {
+		return domain.Refund{}, domain.NewError(domain.ErrInvalidArgument, "to_address is required")
+	}
+	if req.AmountZat <= 0 {
+		return domain.Refund{}, domain.NewError(domain.ErrInvalidArgument, "amount_zat must be > 0")
+	}
+
+	refundID, err := newID("refund")
+	if err != nil {
+		return domain.Refund{}, err
+	}
+
+	status := domain.RefundRequested
+	if req.SentTxID != "" {
+		status = domain.RefundSent
+	}
+
+	now := time.Now().UTC()
+	nowUnix := now.Unix()
+
+	var invoiceIDAny any = nil
+	if req.InvoiceID != "" {
+		invoiceIDAny = req.InvoiceID
+	}
+	var extAny any = nil
+	if req.ExternalRefundID != "" {
+		extAny = req.ExternalRefundID
+	}
+	var sentAny any = nil
+	if req.SentTxID != "" {
+		sentAny = req.SentTxID
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.Refund{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Validate merchant exists.
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM merchants WHERE merchant_id = ?`, req.MerchantID).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.Refund{}, store.ErrNotFound
+		}
+		return domain.Refund{}, err
+	}
+
+	// Validate invoice belongs to merchant (if provided).
+	if req.InvoiceID != "" {
+		var invMerchantID string
+		if err := tx.QueryRowContext(ctx, `SELECT merchant_id FROM invoices WHERE invoice_id = ?`, req.InvoiceID).Scan(&invMerchantID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return domain.Refund{}, store.ErrNotFound
+			}
+			return domain.Refund{}, err
+		}
+		if invMerchantID != req.MerchantID {
+			return domain.Refund{}, store.ErrForbidden
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO refunds (
+			refund_id, merchant_id, invoice_id, external_refund_id,
+			to_address, amount_zat, status, sent_txid, notes,
+			created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		refundID, req.MerchantID, invoiceIDAny, extAny,
+		req.ToAddress, req.AmountZat, string(status), sentAny, req.Notes,
+		nowUnix, nowUnix,
+	); err != nil {
+		return domain.Refund{}, err
+	}
+
+	var invID *string
+	if req.InvoiceID != "" {
+		v := req.InvoiceID
+		invID = &v
+
+		typ := domain.InvoiceEventRefundRequested
+		if status == domain.RefundSent {
+			typ = domain.InvoiceEventRefundSent
+		}
+		if err := s.insertInvoiceEventTx(ctx, tx, req.InvoiceID, typ, now, nil, &refundID); err != nil {
+			return domain.Refund{}, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return domain.Refund{}, err
+	}
+
+	var extID *string
+	if req.ExternalRefundID != "" {
+		v := req.ExternalRefundID
+		extID = &v
+	}
+	var sentTxID *string
+	if req.SentTxID != "" {
+		v := req.SentTxID
+		sentTxID = &v
+	}
+
+	return domain.Refund{
+		RefundID:         refundID,
+		MerchantID:       req.MerchantID,
+		InvoiceID:        invID,
+		ExternalRefundID: extID,
+		ToAddress:        req.ToAddress,
+		AmountZat:        req.AmountZat,
+		Status:           status,
+		SentTxID:         sentTxID,
+		Notes:            req.Notes,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}, nil
+}
+
+func (s *Store) ListRefunds(ctx context.Context, f store.RefundFilter) (refunds []domain.Refund, nextCursor int64, err error) {
+	f.MerchantID = strings.TrimSpace(f.MerchantID)
+	f.InvoiceID = strings.TrimSpace(f.InvoiceID)
+	if f.AfterID < 0 {
+		f.AfterID = 0
+	}
+	if f.Limit <= 0 || f.Limit > 1000 {
+		f.Limit = 100
+	}
+
+	where := []string{"id > ?"}
+	args := []any{f.AfterID}
+
+	if f.MerchantID != "" {
+		where = append(where, "merchant_id = ?")
+		args = append(args, f.MerchantID)
+	}
+	if f.InvoiceID != "" {
+		where = append(where, "invoice_id = ?")
+		args = append(args, f.InvoiceID)
+	}
+	if f.Status != "" {
+		where = append(where, "status = ?")
+		args = append(args, string(f.Status))
+	}
+
+	args = append(args, f.Limit)
+
+	q := `
+		SELECT id, refund_id, merchant_id, invoice_id, external_refund_id, to_address, amount_zat, status, sent_txid, notes, created_at, updated_at
+		FROM refunds
+		WHERE ` + strings.Join(where, " AND ") + `
+		ORDER BY id
+		LIMIT ?
+	`
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	out := make([]domain.Refund, 0, f.Limit)
+	var next int64
+	for rows.Next() {
+		var (
+			seq        int64
+			refundID   string
+			merchantID string
+			invoiceID  sql.NullString
+			externalID sql.NullString
+			toAddress  string
+			amountZat  int64
+			status     string
+			sentTxID   sql.NullString
+			notes      string
+			createdAt  int64
+			updatedAt  int64
+		)
+		if err := rows.Scan(&seq, &refundID, &merchantID, &invoiceID, &externalID, &toAddress, &amountZat, &status, &sentTxID, &notes, &createdAt, &updatedAt); err != nil {
+			return nil, 0, err
+		}
+
+		var invID *string
+		if invoiceID.Valid && strings.TrimSpace(invoiceID.String) != "" {
+			v := invoiceID.String
+			invID = &v
+		}
+		var extID *string
+		if externalID.Valid && strings.TrimSpace(externalID.String) != "" {
+			v := externalID.String
+			extID = &v
+		}
+		var sentID *string
+		if sentTxID.Valid && strings.TrimSpace(sentTxID.String) != "" {
+			v := sentTxID.String
+			sentID = &v
+		}
+
+		out = append(out, domain.Refund{
+			RefundID:         refundID,
+			MerchantID:       merchantID,
+			InvoiceID:        invID,
+			ExternalRefundID: extID,
+			ToAddress:        toAddress,
+			AmountZat:        amountZat,
+			Status:           domain.RefundStatus(status),
+			SentTxID:         sentID,
+			Notes:            notes,
+			CreatedAt:        time.Unix(createdAt, 0).UTC(),
 			UpdatedAt:        time.Unix(updatedAt, 0).UTC(),
 		})
 		next = seq
@@ -1739,13 +2039,13 @@ func scanInvoiceFull(rows *sql.Rows) (domain.Invoice, error) {
 	}, nil
 }
 
-func (s *Store) insertInvoiceEventTx(ctx context.Context, tx *sql.Tx, invoiceID string, typ domain.InvoiceEventType, occurredAt time.Time, dep *domain.DepositRef) error {
-	if dep == nil {
+func (s *Store) insertInvoiceEventTx(ctx context.Context, tx *sql.Tx, invoiceID string, typ domain.InvoiceEventType, occurredAt time.Time, dep *domain.DepositRef, refundID *string) error {
+	if dep == nil && refundID == nil {
 		var exists int
 		if err := tx.QueryRowContext(ctx, `
 			SELECT 1
 			FROM invoice_events
-			WHERE invoice_id = ? AND type = ? AND deposit_txid IS NULL
+			WHERE invoice_id = ? AND type = ? AND deposit_txid IS NULL AND refund_id IS NULL
 			LIMIT 1
 		`, invoiceID, string(typ)).Scan(&exists); err == nil {
 			return nil
@@ -1768,15 +2068,22 @@ func (s *Store) insertInvoiceEventTx(ctx context.Context, tx *sql.Tx, invoiceID 
 		depHeight = dep.Height
 	}
 
+	var refundIDAny any = nil
+	if refundID != nil && strings.TrimSpace(*refundID) != "" {
+		refundIDAny = strings.TrimSpace(*refundID)
+	}
+
 	res, err := tx.ExecContext(ctx, `
 		INSERT OR IGNORE INTO invoice_events (
 			invoice_id, type, occurred_at,
 			deposit_wallet_id, deposit_txid, deposit_action_index, deposit_amount_zat, deposit_height,
+			refund_id,
 			created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		invoiceID, string(typ), occurredUnix,
 		depWalletID, depTxID, depActionIndex, depAmountZat, depHeight,
+		refundIDAny,
 		nowUnix,
 	)
 	if err != nil {
@@ -1789,10 +2096,10 @@ func (s *Store) insertInvoiceEventTx(ctx context.Context, tx *sql.Tx, invoiceID 
 	if rows == 0 {
 		return nil
 	}
-	return s.enqueueOutboxForInvoiceEventTx(ctx, tx, invoiceID, typ, occurredAt, dep)
+	return s.enqueueOutboxForInvoiceEventTx(ctx, tx, invoiceID, typ, occurredAt, dep, refundID)
 }
 
-func (s *Store) enqueueOutboxForInvoiceEventTx(ctx context.Context, tx *sql.Tx, invoiceID string, typ domain.InvoiceEventType, occurredAt time.Time, dep *domain.DepositRef) error {
+func (s *Store) enqueueOutboxForInvoiceEventTx(ctx context.Context, tx *sql.Tx, invoiceID string, typ domain.InvoiceEventType, occurredAt time.Time, dep *domain.DepositRef, refundID *string) error {
 	var merchantID string
 	var externalOrderID string
 	err := tx.QueryRowContext(ctx, `
@@ -1820,6 +2127,57 @@ func (s *Store) enqueueOutboxForInvoiceEventTx(ctx context.Context, tx *sql.Tx, 
 			"action_index": dep.ActionIndex,
 			"amount_zat":   dep.AmountZat,
 			"height":       dep.Height,
+		}
+	}
+	if refundID != nil && strings.TrimSpace(*refundID) != "" {
+		var (
+			rID            string
+			rMerchantID    string
+			rInvoiceID     sql.NullString
+			rExternalID    sql.NullString
+			rToAddress     string
+			rAmountZat     int64
+			rStatus        string
+			rSentTxID      sql.NullString
+			rNotes         string
+			rCreatedAtUnix int64
+			rUpdatedAtUnix int64
+		)
+		err := tx.QueryRowContext(ctx, `
+			SELECT refund_id, merchant_id, invoice_id, external_refund_id, to_address, amount_zat, status, sent_txid, notes, created_at, updated_at
+			FROM refunds
+			WHERE refund_id = ?
+			LIMIT 1
+		`, strings.TrimSpace(*refundID)).Scan(&rID, &rMerchantID, &rInvoiceID, &rExternalID, &rToAddress, &rAmountZat, &rStatus, &rSentTxID, &rNotes, &rCreatedAtUnix, &rUpdatedAtUnix)
+		if err == nil {
+			refund := map[string]any{
+				"refund_id":   rID,
+				"merchant_id": rMerchantID,
+				"to_address":  rToAddress,
+				"amount_zat":  rAmountZat,
+				"status":      rStatus,
+				"notes":       rNotes,
+				"created_at":  time.Unix(rCreatedAtUnix, 0).UTC().Format(time.RFC3339Nano),
+				"updated_at":  time.Unix(rUpdatedAtUnix, 0).UTC().Format(time.RFC3339Nano),
+			}
+			if rInvoiceID.Valid && strings.TrimSpace(rInvoiceID.String) != "" {
+				refund["invoice_id"] = rInvoiceID.String
+			} else {
+				refund["invoice_id"] = nil
+			}
+			if rExternalID.Valid && strings.TrimSpace(rExternalID.String) != "" {
+				refund["external_refund_id"] = rExternalID.String
+			} else {
+				refund["external_refund_id"] = nil
+			}
+			if rSentTxID.Valid && strings.TrimSpace(rSentTxID.String) != "" {
+				refund["sent_txid"] = rSentTxID.String
+			} else {
+				refund["sent_txid"] = nil
+			}
+			data["refund"] = refund
+		} else {
+			data["refund"] = map[string]any{"refund_id": strings.TrimSpace(*refundID)}
 		}
 	}
 	dataBytes, err := json.Marshal(data)
@@ -2034,11 +2392,11 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 
 	switch status {
 	case "detected":
-		if err := s.insertInvoiceEventTx(ctx, tx, applyInvoiceID, domain.InvoiceEventDepositDetected, ev.OccurredAt.UTC(), depRef); err != nil {
+		if err := s.insertInvoiceEventTx(ctx, tx, applyInvoiceID, domain.InvoiceEventDepositDetected, ev.OccurredAt.UTC(), depRef, nil); err != nil {
 			return err
 		}
 	case "confirmed":
-		if err := s.insertInvoiceEventTx(ctx, tx, applyInvoiceID, domain.InvoiceEventDepositConfirmed, ev.OccurredAt.UTC(), depRef); err != nil {
+		if err := s.insertInvoiceEventTx(ctx, tx, applyInvoiceID, domain.InvoiceEventDepositConfirmed, ev.OccurredAt.UTC(), depRef, nil); err != nil {
 			return err
 		}
 	}
@@ -2093,15 +2451,15 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 	if newStatus != domain.InvoiceStatus(invStatus) {
 		switch newStatus {
 		case domain.InvoiceExpired:
-			if err := s.insertInvoiceEventTx(ctx, tx, applyInvoiceID, domain.InvoiceEventInvoiceExpired, now, nil); err != nil {
+			if err := s.insertInvoiceEventTx(ctx, tx, applyInvoiceID, domain.InvoiceEventInvoiceExpired, now, nil, nil); err != nil {
 				return err
 			}
 		case domain.InvoicePaid, domain.InvoicePaidLate:
-			if err := s.insertInvoiceEventTx(ctx, tx, applyInvoiceID, domain.InvoiceEventInvoicePaid, now, nil); err != nil {
+			if err := s.insertInvoiceEventTx(ctx, tx, applyInvoiceID, domain.InvoiceEventInvoicePaid, now, nil, nil); err != nil {
 				return err
 			}
 		case domain.InvoiceOverpaid:
-			if err := s.insertInvoiceEventTx(ctx, tx, applyInvoiceID, domain.InvoiceEventInvoiceOverpaid, now, nil); err != nil {
+			if err := s.insertInvoiceEventTx(ctx, tx, applyInvoiceID, domain.InvoiceEventInvoiceOverpaid, now, nil, nil); err != nil {
 				return err
 			}
 		}

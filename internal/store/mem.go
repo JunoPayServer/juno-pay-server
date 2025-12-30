@@ -23,6 +23,7 @@ type MemStore struct {
 	merchantSeq int64
 	invoiceSeq  int64
 	depositSeq  int64
+	refundSeq   int64
 	sinkSeq     int64
 	outboxSeq   int64
 	deliverySeq int64
@@ -46,6 +47,8 @@ type MemStore struct {
 
 	invoiceEventSeq int64
 	invoiceEvents   map[string][]domain.InvoiceEvent // invoice_id -> events
+
+	refunds []refundRecord // ordered by seq
 
 	eventSinks map[string]domain.EventSink     // sink_id -> sink
 	outbox     []outboxEventRecord             // ordered by seq
@@ -80,6 +83,11 @@ type outboxEventRecord struct {
 	MerchantID string
 	Event      domain.CloudEvent
 	CreatedAt  time.Time
+}
+
+type refundRecord struct {
+	Seq    int64
+	Refund domain.Refund
 }
 
 func NewMem() *MemStore {
@@ -377,7 +385,7 @@ func (s *MemStore) CreateInvoice(_ context.Context, req InvoiceCreate) (domain.I
 	extMap[req.ExternalOrderID] = id
 	s.invoiceByAddress[addrKey] = id
 
-	s.appendInvoiceEventLocked(id, domain.InvoiceEventInvoiceCreated, now, nil)
+	s.appendInvoiceEventLocked(id, domain.InvoiceEventInvoiceCreated, now, nil, nil)
 
 	return inv, true, nil
 }
@@ -671,6 +679,133 @@ func (s *MemStore) ListDeposits(_ context.Context, f DepositFilter) ([]domain.De
 	return out, nextCursor, nil
 }
 
+func (s *MemStore) CreateRefund(_ context.Context, req RefundCreate) (domain.Refund, error) {
+	req.MerchantID = strings.TrimSpace(req.MerchantID)
+	req.InvoiceID = strings.TrimSpace(req.InvoiceID)
+	req.ExternalRefundID = strings.TrimSpace(req.ExternalRefundID)
+	req.ToAddress = strings.TrimSpace(req.ToAddress)
+	req.SentTxID = strings.TrimSpace(req.SentTxID)
+	req.Notes = strings.TrimSpace(req.Notes)
+	if req.MerchantID == "" {
+		return domain.Refund{}, domain.NewError(domain.ErrInvalidArgument, "merchant_id is required")
+	}
+	if req.ToAddress == "" {
+		return domain.Refund{}, domain.NewError(domain.ErrInvalidArgument, "to_address is required")
+	}
+	if req.AmountZat <= 0 {
+		return domain.Refund{}, domain.NewError(domain.ErrInvalidArgument, "amount_zat must be > 0")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.merchants[req.MerchantID]; !ok {
+		return domain.Refund{}, ErrNotFound
+	}
+
+	if req.InvoiceID != "" {
+		inv, ok := s.invoices[req.InvoiceID]
+		if !ok {
+			return domain.Refund{}, ErrNotFound
+		}
+		if inv.MerchantID != req.MerchantID {
+			return domain.Refund{}, ErrForbidden
+		}
+	}
+
+	s.refundSeq++
+	now := time.Now().UTC()
+	refundID := fmt.Sprintf("refund_%016x", s.refundSeq)
+
+	var invoiceID *string
+	if req.InvoiceID != "" {
+		v := req.InvoiceID
+		invoiceID = &v
+	}
+	var externalRefundID *string
+	if req.ExternalRefundID != "" {
+		v := req.ExternalRefundID
+		externalRefundID = &v
+	}
+	var sentTxID *string
+	if req.SentTxID != "" {
+		v := req.SentTxID
+		sentTxID = &v
+	}
+	status := domain.RefundRequested
+	if sentTxID != nil {
+		status = domain.RefundSent
+	}
+
+	refund := domain.Refund{
+		RefundID:         refundID,
+		MerchantID:       req.MerchantID,
+		InvoiceID:        invoiceID,
+		ExternalRefundID: externalRefundID,
+		ToAddress:        req.ToAddress,
+		AmountZat:        req.AmountZat,
+		Status:           status,
+		SentTxID:         sentTxID,
+		Notes:            req.Notes,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	s.refunds = append(s.refunds, refundRecord{
+		Seq:    s.refundSeq,
+		Refund: refund,
+	})
+
+	if invoiceID != nil {
+		typ := domain.InvoiceEventRefundRequested
+		if status == domain.RefundSent {
+			typ = domain.InvoiceEventRefundSent
+		}
+		s.appendInvoiceEventLocked(*invoiceID, typ, now, nil, &refund)
+	}
+
+	return refund, nil
+}
+
+func (s *MemStore) ListRefunds(_ context.Context, f RefundFilter) ([]domain.Refund, int64, error) {
+	f.MerchantID = strings.TrimSpace(f.MerchantID)
+	f.InvoiceID = strings.TrimSpace(f.InvoiceID)
+	if f.AfterID < 0 {
+		f.AfterID = 0
+	}
+	if f.Limit <= 0 || f.Limit > 1000 {
+		f.Limit = 100
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]domain.Refund, 0, f.Limit)
+	var nextCursor int64
+	for _, r := range s.refunds {
+		if r.Seq <= f.AfterID {
+			continue
+		}
+		refund := r.Refund
+		if f.MerchantID != "" && refund.MerchantID != f.MerchantID {
+			continue
+		}
+		if f.InvoiceID != "" {
+			if refund.InvoiceID == nil || *refund.InvoiceID != f.InvoiceID {
+				continue
+			}
+		}
+		if f.Status != "" && refund.Status != f.Status {
+			continue
+		}
+		out = append(out, refund)
+		nextCursor = r.Seq
+		if len(out) >= f.Limit {
+			break
+		}
+	}
+	return out, nextCursor, nil
+}
+
 func (s *MemStore) applyDepositLocked(ev ScanEvent, walletID, txid string, actionIndex int32, recipientAddress string, amountZatoshis uint64, height int64, status string, confirmedHeight *int64) {
 	if walletID == "" {
 		walletID = ev.WalletID
@@ -742,9 +877,9 @@ func (s *MemStore) applyDepositLocked(ev ScanEvent, walletID, txid string, actio
 
 	switch status {
 	case "detected":
-		s.appendInvoiceEventLocked(rec.InvoiceID, domain.InvoiceEventDepositDetected, ev.OccurredAt.UTC(), depRef)
+		s.appendInvoiceEventLocked(rec.InvoiceID, domain.InvoiceEventDepositDetected, ev.OccurredAt.UTC(), depRef, nil)
 	case "confirmed":
-		s.appendInvoiceEventLocked(rec.InvoiceID, domain.InvoiceEventDepositConfirmed, ev.OccurredAt.UTC(), depRef)
+		s.appendInvoiceEventLocked(rec.InvoiceID, domain.InvoiceEventDepositConfirmed, ev.OccurredAt.UTC(), depRef, nil)
 	}
 
 	s.recomputeInvoiceLocked(rec.InvoiceID)
@@ -781,11 +916,11 @@ func (s *MemStore) recomputeInvoiceLocked(invoiceID string) {
 	if inv.Status != prevStatus {
 		switch inv.Status {
 		case domain.InvoiceExpired:
-			s.appendInvoiceEventLocked(invoiceID, domain.InvoiceEventInvoiceExpired, now, nil)
+			s.appendInvoiceEventLocked(invoiceID, domain.InvoiceEventInvoiceExpired, now, nil, nil)
 		case domain.InvoicePaid, domain.InvoicePaidLate:
-			s.appendInvoiceEventLocked(invoiceID, domain.InvoiceEventInvoicePaid, now, nil)
+			s.appendInvoiceEventLocked(invoiceID, domain.InvoiceEventInvoicePaid, now, nil, nil)
 		case domain.InvoiceOverpaid:
-			s.appendInvoiceEventLocked(invoiceID, domain.InvoiceEventInvoiceOverpaid, now, nil)
+			s.appendInvoiceEventLocked(invoiceID, domain.InvoiceEventInvoiceOverpaid, now, nil, nil)
 		}
 	}
 }
@@ -810,13 +945,14 @@ func computeInvoiceStatus(inv domain.Invoice, now time.Time) domain.InvoiceStatu
 	}
 }
 
-func (s *MemStore) appendInvoiceEventLocked(invoiceID string, typ domain.InvoiceEventType, occurredAt time.Time, dep *domain.DepositRef) {
+func (s *MemStore) appendInvoiceEventLocked(invoiceID string, typ domain.InvoiceEventType, occurredAt time.Time, dep *domain.DepositRef, refund *domain.Refund) {
 	if invoiceID == "" {
 		return
 	}
 
-	// Ensure idempotency for deposit events by checking existing refs.
-	if dep != nil {
+	// Ensure idempotency for deposit/refund events by checking existing refs.
+	switch {
+	case dep != nil:
 		for _, e := range s.invoiceEvents[invoiceID] {
 			if e.Type != typ || e.Deposit == nil {
 				continue
@@ -827,9 +963,18 @@ func (s *MemStore) appendInvoiceEventLocked(invoiceID string, typ domain.Invoice
 				return
 			}
 		}
-	} else {
+	case refund != nil:
 		for _, e := range s.invoiceEvents[invoiceID] {
-			if e.Type == typ && e.Deposit == nil {
+			if e.Type != typ || e.Refund == nil {
+				continue
+			}
+			if e.Refund.RefundID == refund.RefundID {
+				return
+			}
+		}
+	default:
+		for _, e := range s.invoiceEvents[invoiceID] {
+			if e.Type == typ && e.Deposit == nil && e.Refund == nil {
 				return
 			}
 		}
@@ -837,26 +982,34 @@ func (s *MemStore) appendInvoiceEventLocked(invoiceID string, typ domain.Invoice
 
 	s.invoiceEventSeq++
 	idStr := strconv.FormatInt(s.invoiceEventSeq, 10)
+
+	var refundCopy *domain.Refund
+	if refund != nil {
+		c := *refund
+		refundCopy = &c
+	}
 	s.invoiceEvents[invoiceID] = append(s.invoiceEvents[invoiceID], domain.InvoiceEvent{
 		EventID:    idStr,
 		Type:       typ,
 		OccurredAt: occurredAt,
 		InvoiceID:  invoiceID,
 		Deposit:    dep,
+		Refund:     refundCopy,
 	})
 
-	s.enqueueOutboxLocked(invoiceID, typ, occurredAt, dep)
+	s.enqueueOutboxLocked(invoiceID, typ, occurredAt, dep, refundCopy)
 }
 
-func (s *MemStore) enqueueOutboxLocked(invoiceID string, typ domain.InvoiceEventType, occurredAt time.Time, dep *domain.DepositRef) {
+func (s *MemStore) enqueueOutboxLocked(invoiceID string, typ domain.InvoiceEventType, occurredAt time.Time, dep *domain.DepositRef, refund *domain.Refund) {
 	inv, ok := s.invoices[invoiceID]
 	if !ok {
 		return
 	}
 
 	data := map[string]any{
-		"merchant_id": inv.MerchantID,
-		"invoice_id":  invoiceID,
+		"merchant_id":       inv.MerchantID,
+		"invoice_id":        invoiceID,
+		"external_order_id": inv.ExternalOrderID,
 	}
 	if dep != nil {
 		data["deposit"] = map[string]any{
@@ -865,6 +1018,16 @@ func (s *MemStore) enqueueOutboxLocked(invoiceID string, typ domain.InvoiceEvent
 			"action_index": dep.ActionIndex,
 			"amount_zat":   dep.AmountZat,
 			"height":       dep.Height,
+		}
+	}
+	if refund != nil {
+		data["refund"] = map[string]any{
+			"refund_id":  refund.RefundID,
+			"to_address": refund.ToAddress,
+			"amount_zat": refund.AmountZat,
+			"status":     string(refund.Status),
+			"sent_txid":  refund.SentTxID,
+			"notes":      refund.Notes,
 		}
 	}
 	dataBytes, err := json.Marshal(data)

@@ -548,3 +548,122 @@ func TestMemStore_ListDeposits_FilterAndCursor(t *testing.T) {
 		t.Fatalf("expected only tx1 for invoice_id filter")
 	}
 }
+
+func TestMemStore_Refunds_CreateListAndInvoiceEvents(t *testing.T) {
+	st := NewMem()
+	ctx := context.Background()
+
+	m, err := st.CreateMerchant(ctx, "acme", domain.MerchantSettings{
+		InvoiceTTLSeconds:     0,
+		RequiredConfirmations: 0,
+		Policies: domain.InvoicePolicies{
+			LatePayment:    domain.LatePaymentMarkPaidLate,
+			PartialPayment: domain.PartialPaymentAccept,
+			Overpayment:    domain.OverpaymentMarkOverpaid,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateMerchant: %v", err)
+	}
+
+	inv, _, err := st.CreateInvoice(ctx, InvoiceCreate{
+		MerchantID:            m.MerchantID,
+		ExternalOrderID:       "order-1",
+		WalletID:              "w1",
+		AddressIndex:          0,
+		Address:               "j1a",
+		CreatedAfterHeight:    0,
+		CreatedAfterHash:      "h0",
+		AmountZat:             10,
+		RequiredConfirmations: 0,
+		Policies: domain.InvoicePolicies{
+			LatePayment:    domain.LatePaymentManualReview,
+			PartialPayment: domain.PartialPaymentAccept,
+			Overpayment:    domain.OverpaymentManualReview,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateInvoice: %v", err)
+	}
+
+	r1, err := st.CreateRefund(ctx, RefundCreate{
+		MerchantID: m.MerchantID,
+		InvoiceID:  inv.InvoiceID,
+		ToAddress:  "j1dest",
+		AmountZat:  1,
+		Notes:      "n1",
+	})
+	if err != nil {
+		t.Fatalf("CreateRefund r1: %v", err)
+	}
+	if r1.Status != domain.RefundRequested {
+		t.Fatalf("expected requested status")
+	}
+	if r1.InvoiceID == nil || *r1.InvoiceID != inv.InvoiceID {
+		t.Fatalf("expected invoice_id on refund")
+	}
+
+	r2, err := st.CreateRefund(ctx, RefundCreate{
+		MerchantID: m.MerchantID,
+		InvoiceID:  inv.InvoiceID,
+		ToAddress:  "j1dest2",
+		AmountZat:  2,
+		SentTxID:   "txsent",
+	})
+	if err != nil {
+		t.Fatalf("CreateRefund r2: %v", err)
+	}
+	if r2.Status != domain.RefundSent {
+		t.Fatalf("expected sent status")
+	}
+	if r2.SentTxID == nil || *r2.SentTxID != "txsent" {
+		t.Fatalf("expected sent_txid")
+	}
+
+	refunds, _, err := st.ListRefunds(ctx, RefundFilter{MerchantID: m.MerchantID, AfterID: 0, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListRefunds: %v", err)
+	}
+	if len(refunds) != 2 {
+		t.Fatalf("expected 2 refunds")
+	}
+
+	sentOnly, _, err := st.ListRefunds(ctx, RefundFilter{MerchantID: m.MerchantID, Status: domain.RefundSent, AfterID: 0, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListRefunds sentOnly: %v", err)
+	}
+	if len(sentOnly) != 1 || sentOnly[0].RefundID != r2.RefundID {
+		t.Fatalf("expected only r2 when filtering by status=sent")
+	}
+
+	events, _, err := st.ListInvoiceEvents(ctx, inv.InvoiceID, 0, 100)
+	if err != nil {
+		t.Fatalf("ListInvoiceEvents: %v", err)
+	}
+	var gotRequested, gotSent int
+	for _, e := range events {
+		switch e.Type {
+		case domain.InvoiceEventRefundRequested:
+			gotRequested++
+		case domain.InvoiceEventRefundSent:
+			gotSent++
+		}
+	}
+	if gotRequested != 1 || gotSent != 1 {
+		t.Fatalf("expected refund events requested=1 sent=1, got requested=%d sent=%d", gotRequested, gotSent)
+	}
+
+	outbox, _, err := st.ListOutboundEvents(ctx, m.MerchantID, 0, 100)
+	if err != nil {
+		t.Fatalf("ListOutboundEvents: %v", err)
+	}
+	var outboxRefunds int
+	for _, e := range outbox {
+		if e.Type == string(domain.InvoiceEventRefundRequested) || e.Type == string(domain.InvoiceEventRefundSent) {
+			outboxRefunds++
+		}
+	}
+	if outboxRefunds != 2 {
+		t.Fatalf("expected 2 refund events in outbox, got %d", outboxRefunds)
+	}
+}
