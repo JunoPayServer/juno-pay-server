@@ -150,6 +150,13 @@ func (w *Worker) Sync(ctx context.Context) error {
 	return nil
 }
 
+func (w *Worker) Deliver(ctx context.Context, sink domain.EventSink, ev domain.CloudEvent) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return w.deliver(ctx, sink, ev)
+}
+
 func (w *Worker) Run(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()

@@ -10,11 +10,13 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Abdullah1738/juno-pay-server/internal/domain"
+	"github.com/Abdullah1738/juno-pay-server/internal/outbox"
 	"github.com/Abdullah1738/juno-pay-server/internal/store"
 )
 
@@ -118,6 +120,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/admin/merchants", s.handleAdminMerchants)
 	mux.HandleFunc("/v1/admin/merchants/", s.handleAdminMerchantSubroutes)
 	mux.HandleFunc("/v1/admin/api-keys/", s.handleAdminAPIKeys)
+	mux.HandleFunc("/v1/admin/event-sinks", s.handleAdminEventSinks)
+	mux.HandleFunc("/v1/admin/event-sinks/", s.handleAdminEventSinkSubroutes)
+	mux.HandleFunc("/v1/admin/events", s.handleAdminEvents)
+	mux.HandleFunc("/v1/admin/event-deliveries", s.handleAdminEventDeliveries)
 	return mux
 }
 
@@ -970,6 +976,361 @@ func (s *Server) handleAdminAPIKeys(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
+func (s *Server) handleAdminEventSinks(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPost:
+		s.handleAdminCreateEventSink(w, r)
+	case http.MethodGet:
+		s.handleAdminListEventSinks(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+type eventSinkCreateRequest struct {
+	MerchantID string         `json:"merchant_id"`
+	Kind       string         `json:"kind"`
+	Config     map[string]any `json:"config"`
+}
+
+func validateEventSinkConfig(kind domain.EventSinkKind, cfg map[string]any) error {
+	switch kind {
+	case domain.EventSinkWebhook:
+		rawURL, _ := cfg["url"].(string)
+		rawURL = strings.TrimSpace(rawURL)
+		if rawURL == "" {
+			return errors.New("config.url is required")
+		}
+		u, err := url.Parse(rawURL)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return errors.New("config.url invalid")
+		}
+		if v, ok := cfg["secret"]; ok {
+			if _, ok := v.(string); !ok {
+				return errors.New("config.secret must be a string")
+			}
+		}
+		if v, ok := cfg["timeout_ms"]; ok {
+			switch n := v.(type) {
+			case float64:
+				if n < 0 {
+					return errors.New("config.timeout_ms must be >= 0")
+				}
+			case int:
+				if n < 0 {
+					return errors.New("config.timeout_ms must be >= 0")
+				}
+			case int64:
+				if n < 0 {
+					return errors.New("config.timeout_ms must be >= 0")
+				}
+			default:
+				return errors.New("config.timeout_ms must be a number")
+			}
+		}
+		return nil
+
+	case domain.EventSinkKafka:
+		brokers, _ := cfg["brokers"].(string)
+		brokers = strings.TrimSpace(brokers)
+		topic, _ := cfg["topic"].(string)
+		topic = strings.TrimSpace(topic)
+		if brokers == "" {
+			return errors.New("config.brokers is required")
+		}
+		if topic == "" {
+			return errors.New("config.topic is required")
+		}
+		return nil
+
+	case domain.EventSinkNATS:
+		rawURL, _ := cfg["url"].(string)
+		rawURL = strings.TrimSpace(rawURL)
+		subject, _ := cfg["subject"].(string)
+		subject = strings.TrimSpace(subject)
+		if rawURL == "" {
+			return errors.New("config.url is required")
+		}
+		if subject == "" {
+			return errors.New("config.subject is required")
+		}
+		return nil
+
+	case domain.EventSinkRabbitMQ:
+		rawURL, _ := cfg["url"].(string)
+		rawURL = strings.TrimSpace(rawURL)
+		queue, _ := cfg["queue"].(string)
+		queue = strings.TrimSpace(queue)
+		if rawURL == "" {
+			return errors.New("config.url is required")
+		}
+		if queue == "" {
+			return errors.New("config.queue is required")
+		}
+		return nil
+
+	default:
+		return errors.New("kind invalid")
+	}
+}
+
+func (s *Server) handleAdminCreateEventSink(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req eventSinkCreateRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", "invalid json")
+		return
+	}
+	req.MerchantID = strings.TrimSpace(req.MerchantID)
+	if req.MerchantID == "" {
+		writeError(w, http.StatusBadRequest, "invalid_argument", "merchant_id is required")
+		return
+	}
+
+	kind := domain.EventSinkKind(strings.TrimSpace(req.Kind))
+	if err := validateEventSinkConfig(kind, req.Config); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_argument", err.Error())
+		return
+	}
+	cfgBytes, err := json.Marshal(req.Config)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_argument", "config invalid")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	sink, err := s.st.CreateEventSink(ctx, store.EventSinkCreate{
+		MerchantID: req.MerchantID,
+		Kind:       kind,
+		Config:     cfgBytes,
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "merchant not found")
+			return
+		}
+		if de, ok := domain.AsError(err); ok && de.Code == domain.ErrInvalidArgument {
+			writeError(w, http.StatusBadRequest, string(de.Code), de.Message)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"status": "ok",
+		"data":   toEventSinkJSON(sink),
+	})
+}
+
+func (s *Server) handleAdminListEventSinks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	merchantID := strings.TrimSpace(r.URL.Query().Get("merchant_id"))
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	sinks, err := s.st.ListEventSinks(ctx, merchantID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+
+	out := make([]any, 0, len(sinks))
+	for _, sink := range sinks {
+		out = append(out, toEventSinkJSON(sink))
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok",
+		"data":   out,
+	})
+}
+
+func (s *Server) handleAdminEventSinkSubroutes(w http.ResponseWriter, r *http.Request) {
+	// /v1/admin/event-sinks/{sink_id}/test
+	if !s.requireAdmin(w, r) {
+		return
+	}
+
+	path := strings.TrimPrefix(r.URL.Path, "/v1/admin/event-sinks/")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] != "test" {
+		http.NotFound(w, r)
+		return
+	}
+	sinkID := parts[0]
+	s.handleAdminTestEventSink(w, r, sinkID)
+}
+
+func (s *Server) handleAdminTestEventSink(w http.ResponseWriter, r *http.Request, sinkID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	sink, found, err := s.st.GetEventSink(ctx, sinkID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "not_found", "sink not found")
+		return
+	}
+
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "random error")
+		return
+	}
+	eventID := "test_" + hex.EncodeToString(nonce[:])
+	dataBytes, _ := json.Marshal(map[string]any{
+		"merchant_id": sink.MerchantID,
+		"sink_id":     sink.SinkID,
+	})
+	ev := domain.CloudEvent{
+		SpecVersion:     "1.0",
+		ID:              eventID,
+		Source:          "juno-pay-server",
+		Type:            "event-sink.test",
+		Subject:         "event-sink/" + sink.SinkID,
+		Time:            s.clock.Now().UTC(),
+		DataContentType: "application/json",
+		Data:            dataBytes,
+	}
+
+	worker, err := outbox.New(s.st)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "outbox error")
+		return
+	}
+
+	if err := worker.Deliver(ctx, sink, ev); err != nil {
+		writeError(w, http.StatusBadRequest, "delivery_failed", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+}
+
+func (s *Server) handleAdminEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.requireAdmin(w, r) {
+		return
+	}
+
+	merchantID := strings.TrimSpace(r.URL.Query().Get("merchant_id"))
+
+	afterID := int64(0)
+	if v := strings.TrimSpace(r.URL.Query().Get("cursor")); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			writeError(w, http.StatusBadRequest, "invalid_argument", "invalid cursor")
+			return
+		}
+		afterID = n
+	}
+
+	limit := 100
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 500 {
+			writeError(w, http.StatusBadRequest, "invalid_argument", "invalid limit")
+			return
+		}
+		limit = n
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	events, nextCursor, err := s.st.ListOutboundEvents(ctx, merchantID, afterID, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok",
+		"data": map[string]any{
+			"events":      events,
+			"next_cursor": strconv.FormatInt(nextCursor, 10),
+		},
+	})
+}
+
+func (s *Server) handleAdminEventDeliveries(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.requireAdmin(w, r) {
+		return
+	}
+
+	merchantID := strings.TrimSpace(r.URL.Query().Get("merchant_id"))
+	sinkID := strings.TrimSpace(r.URL.Query().Get("sink_id"))
+	status := domain.EventDeliveryStatus(strings.TrimSpace(r.URL.Query().Get("status")))
+	switch status {
+	case "", domain.EventDeliveryPending, domain.EventDeliveryDelivered, domain.EventDeliveryFailed:
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_argument", "invalid status")
+		return
+	}
+
+	limit := 100
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 500 {
+			writeError(w, http.StatusBadRequest, "invalid_argument", "invalid limit")
+			return
+		}
+		limit = n
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	ds, err := s.st.ListEventDeliveries(ctx, store.EventDeliveryFilter{
+		MerchantID: merchantID,
+		SinkID:     sinkID,
+		Status:     status,
+		Limit:      limit,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok",
+		"data":   ds,
+	})
+}
+
 func toMerchantJSON(m domain.Merchant) map[string]any {
 	return map[string]any{
 		"merchant_id": m.MerchantID,
@@ -998,6 +1359,26 @@ func toMerchantWalletJSON(w0 store.MerchantWallet) map[string]any {
 		"ua_hrp":      w0.UAHRP,
 		"coin_type":   w0.CoinType,
 		"created_at":  w0.CreatedAt.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func toEventSinkJSON(sink domain.EventSink) map[string]any {
+	var cfg any = map[string]any{}
+	var tmp any
+	if err := json.Unmarshal(sink.Config, &tmp); err == nil {
+		if m, ok := tmp.(map[string]any); ok {
+			cfg = m
+		}
+	}
+
+	return map[string]any{
+		"sink_id":     sink.SinkID,
+		"merchant_id": sink.MerchantID,
+		"kind":        string(sink.Kind),
+		"status":      string(sink.Status),
+		"config":      cfg,
+		"created_at":  sink.CreatedAt.UTC().Format(time.RFC3339Nano),
+		"updated_at":  sink.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
 }
 
