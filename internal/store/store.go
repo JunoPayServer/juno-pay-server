@@ -52,6 +52,7 @@ type Store interface {
 	// Wallets (one UFVK per merchant; immutable)
 	SetMerchantWallet(ctx context.Context, merchantID string, w MerchantWallet) (MerchantWallet, error)
 	GetMerchantWallet(ctx context.Context, merchantID string) (MerchantWallet, bool, error)
+	NextAddressIndex(ctx context.Context, merchantID string) (uint32, error)
 
 	// Merchant API keys (for invoice creation only)
 	CreateMerchantAPIKey(ctx context.Context, merchantID, label string) (keyID string, apiKey string, err error)

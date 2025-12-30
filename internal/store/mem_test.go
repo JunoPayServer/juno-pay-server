@@ -78,6 +78,17 @@ func TestMemStore_SetMerchantWallet_Immutable(t *testing.T) {
 		t.Fatalf("SetMerchantWallet first: %v", err)
 	}
 
+	if idx, err := st.NextAddressIndex(ctx, m.MerchantID); err != nil {
+		t.Fatalf("NextAddressIndex: %v", err)
+	} else if idx != 0 {
+		t.Fatalf("expected idx=0, got %d", idx)
+	}
+	if idx, err := st.NextAddressIndex(ctx, m.MerchantID); err != nil {
+		t.Fatalf("NextAddressIndex: %v", err)
+	} else if idx != 1 {
+		t.Fatalf("expected idx=1, got %d", idx)
+	}
+
 	if _, err := st.SetMerchantWallet(ctx, m.MerchantID, MerchantWallet{
 		WalletID: "w2",
 		UFVK:     "jview1test",

@@ -21,6 +21,7 @@ type MemStore struct {
 
 	merchants      map[string]domain.Merchant
 	merchantWallet map[string]MerchantWallet
+	nextAddressIndex map[string]uint32 // merchant_id -> next address index
 
 	invoices          map[string]domain.Invoice
 	invoiceByExternal map[string]map[string]string // merchant_id -> external_order_id -> invoice_id
@@ -45,6 +46,7 @@ func NewMem() *MemStore {
 	return &MemStore{
 		merchants:        make(map[string]domain.Merchant),
 		merchantWallet:   make(map[string]MerchantWallet),
+		nextAddressIndex: make(map[string]uint32),
 		invoices:         make(map[string]domain.Invoice),
 		invoiceByExternal: make(map[string]map[string]string),
 		invoiceByAddress: make(map[string]string),
@@ -147,6 +149,7 @@ func (s *MemStore) SetMerchantWallet(_ context.Context, merchantID string, w Mer
 
 	w.CreatedAt = time.Now().UTC()
 	s.merchantWallet[merchantID] = w
+	s.nextAddressIndex[merchantID] = 0
 	return w, nil
 }
 
@@ -155,6 +158,27 @@ func (s *MemStore) GetMerchantWallet(_ context.Context, merchantID string) (Merc
 	defer s.mu.Unlock()
 	w, ok := s.merchantWallet[merchantID]
 	return w, ok, nil
+}
+
+func (s *MemStore) NextAddressIndex(_ context.Context, merchantID string) (uint32, error) {
+	merchantID = strings.TrimSpace(merchantID)
+	if merchantID == "" {
+		return 0, domain.NewError(domain.ErrInvalidArgument, "merchant_id is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.merchants[merchantID]; !ok {
+		return 0, ErrNotFound
+	}
+	if _, ok := s.merchantWallet[merchantID]; !ok {
+		return 0, ErrNotFound
+	}
+
+	idx := s.nextAddressIndex[merchantID]
+	s.nextAddressIndex[merchantID] = idx + 1
+	return idx, nil
 }
 
 func (s *MemStore) CreateMerchantAPIKey(_ context.Context, merchantID, label string) (keyID string, apiKey string, err error) {
