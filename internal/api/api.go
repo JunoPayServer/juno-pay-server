@@ -124,6 +124,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/admin/event-sinks/", s.handleAdminEventSinkSubroutes)
 	mux.HandleFunc("/v1/admin/events", s.handleAdminEvents)
 	mux.HandleFunc("/v1/admin/event-deliveries", s.handleAdminEventDeliveries)
+	mux.HandleFunc("/v1/admin/invoices", s.handleAdminInvoices)
+	mux.HandleFunc("/v1/admin/invoices/", s.handleAdminInvoiceSubroutes)
 	return mux
 }
 
@@ -1328,6 +1330,110 @@ func (s *Server) handleAdminEventDeliveries(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "ok",
 		"data":   ds,
+	})
+}
+
+func (s *Server) handleAdminInvoices(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.requireAdmin(w, r) {
+		return
+	}
+
+	merchantID := strings.TrimSpace(r.URL.Query().Get("merchant_id"))
+	externalOrderID := strings.TrimSpace(r.URL.Query().Get("external_order_id"))
+	status := domain.InvoiceStatus(strings.TrimSpace(r.URL.Query().Get("status")))
+	switch status {
+	case "", domain.InvoiceOpen, domain.InvoicePartial, domain.InvoicePaid, domain.InvoiceOverpaid, domain.InvoiceExpired, domain.InvoicePaidLate, domain.InvoiceCanceled:
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_argument", "invalid status")
+		return
+	}
+
+	afterID := int64(0)
+	if v := strings.TrimSpace(r.URL.Query().Get("cursor")); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			writeError(w, http.StatusBadRequest, "invalid_argument", "invalid cursor")
+			return
+		}
+		afterID = n
+	}
+
+	limit := 100
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 500 {
+			writeError(w, http.StatusBadRequest, "invalid_argument", "invalid limit")
+			return
+		}
+		limit = n
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	invoices, nextCursor, err := s.st.ListInvoices(ctx, store.InvoiceFilter{
+		MerchantID:      merchantID,
+		Status:          status,
+		ExternalOrderID: externalOrderID,
+		AfterID:         afterID,
+		Limit:           limit,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+
+	out := make([]any, 0, len(invoices))
+	for _, inv := range invoices {
+		out = append(out, toInvoiceJSON(inv))
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok",
+		"data": map[string]any{
+			"invoices":    out,
+			"next_cursor": strconv.FormatInt(nextCursor, 10),
+		},
+	})
+}
+
+func (s *Server) handleAdminInvoiceSubroutes(w http.ResponseWriter, r *http.Request) {
+	// /v1/admin/invoices/{invoice_id}
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	invoiceID := strings.TrimPrefix(r.URL.Path, "/v1/admin/invoices/")
+	invoiceID = strings.TrimSpace(invoiceID)
+	if invoiceID == "" || strings.Contains(invoiceID, "/") {
+		http.NotFound(w, r)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	inv, found, err := s.st.GetInvoice(ctx, invoiceID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "not_found", "invoice not found")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok",
+		"data":   toInvoiceJSON(inv),
 	})
 }
 
