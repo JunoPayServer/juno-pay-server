@@ -1,29 +1,25 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useEffect, useState } from "react";
 import { ErrorBanner } from "@/components/ErrorBanner";
 import { APIError, type Deposit, listDeposits } from "@/lib/api";
 
 export default function DepositsPage() {
-  const sp = useSearchParams();
-  const initialInvoiceID = useMemo(() => sp.get("invoice_id") ?? "", [sp]);
-
   const [merchantID, setMerchantID] = useState("");
-  const [invoiceID, setInvoiceID] = useState(initialInvoiceID);
+  const [invoiceID, setInvoiceID] = useState("");
   const [txid, setTxID] = useState("");
 
   const [deposits, setDeposits] = useState<Deposit[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  async function refresh() {
+  async function refresh(override?: { merchantID?: string; invoiceID?: string; txid?: string }) {
     try {
       setError(null);
       const out = await listDeposits({
-        merchant_id: merchantID.trim() || undefined,
-        invoice_id: invoiceID.trim() || undefined,
-        txid: txid.trim() || undefined,
+        merchant_id: (override?.merchantID ?? merchantID).trim() || undefined,
+        invoice_id: (override?.invoiceID ?? invoiceID).trim() || undefined,
+        txid: (override?.txid ?? txid).trim() || undefined,
         limit: "100",
       });
       setDeposits(out.deposits);
@@ -36,12 +32,10 @@ export default function DepositsPage() {
   }
 
   useEffect(() => {
-    void refresh();
+    const inv = new URLSearchParams(window.location.search).get("invoice_id") ?? "";
+    setInvoiceID(inv);
+    void refresh({ invoiceID: inv });
   }, []);
-
-  useEffect(() => {
-    setInvoiceID(initialInvoiceID);
-  }, [initialInvoiceID]);
 
   return (
     <div className="space-y-6">
