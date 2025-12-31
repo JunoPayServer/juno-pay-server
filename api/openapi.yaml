@@ -214,24 +214,6 @@ paths:
               schema:
                 type: string
 
-  /v1/demo/air/purchase:
-    post:
-      summary: Demo checkout - buy 1 gallon of air for 1 JUNO
-      operationId: demoBuyAir
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/DemoAirPurchaseRequest"
-      responses:
-        "201":
-          description: Created
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/OkInvoiceResponse"
-
   /v1/admin/status:
     get:
       summary: Admin status (sync + restarts + backlog)
@@ -994,14 +976,6 @@ components:
         password:
           type: string
           minLength: 1
-
-    DemoAirPurchaseRequest:
-      type: object
-      description: Optional inputs for the demo checkout flow.
-      properties:
-        buyer_id:
-          type: string
-          maxLength: 256
 
     OkEmptyResponse:
       type: object
