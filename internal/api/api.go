@@ -1472,9 +1472,14 @@ func (s *Server) handleAdminEventDeliveries(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	out := make([]any, 0, len(ds))
+	for _, d := range ds {
+		out = append(out, toEventDeliveryJSON(d))
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "ok",
-		"data":   ds,
+		"data":   out,
 	})
 }
 
@@ -1964,6 +1969,29 @@ func toEventSinkJSON(sink domain.EventSink) map[string]any {
 		"config":      cfg,
 		"created_at":  sink.CreatedAt.UTC().Format(time.RFC3339Nano),
 		"updated_at":  sink.UpdatedAt.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func toEventDeliveryJSON(d domain.EventDelivery) map[string]any {
+	var nextRetryAt any = nil
+	if d.NextRetryAt != nil {
+		nextRetryAt = d.NextRetryAt.UTC().Format(time.RFC3339Nano)
+	}
+	var lastError any = nil
+	if d.LastError != nil && strings.TrimSpace(*d.LastError) != "" {
+		lastError = *d.LastError
+	}
+
+	return map[string]any{
+		"delivery_id":   d.DeliveryID,
+		"sink_id":       d.SinkID,
+		"event_id":      d.EventID,
+		"status":        string(d.Status),
+		"attempt":       d.Attempt,
+		"next_retry_at": nextRetryAt,
+		"last_error":    lastError,
+		"created_at":    d.CreatedAt.UTC().Format(time.RFC3339Nano),
+		"updated_at":    d.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
 }
 

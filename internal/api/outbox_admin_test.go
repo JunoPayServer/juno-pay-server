@@ -173,8 +173,11 @@ func TestAdmin_EventSinksAndOutboundEvents(t *testing.T) {
 		t.Fatalf("list deliveries: expected 200, got %d: %s", dRec.Code, dRec.Body.String())
 	}
 	var dResp struct {
-		Status string                 `json:"status"`
-		Data   []domain.EventDelivery `json:"data"`
+		Status string `json:"status"`
+		Data   []struct {
+			DeliveryID string `json:"delivery_id"`
+			SinkID     string `json:"sink_id"`
+		} `json:"data"`
 	}
 	if err := json.Unmarshal(dRec.Body.Bytes(), &dResp); err != nil {
 		t.Fatalf("unmarshal deliveries: %v", err)
