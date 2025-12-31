@@ -1,4 +1,4 @@
-.PHONY: build rust-build rust-test test test-unit test-integration test-e2e admin-deps admin-test-unit admin-test-e2e fmt tidy clean
+.PHONY: build rust-build rust-test test test-unit test-integration test-e2e admin-deps admin-test-unit admin-test-e2e demo-deps demo-test-unit demo-test-e2e fmt tidy clean
 
 TESTFLAGS ?=
 
@@ -11,6 +11,8 @@ BIN := $(BIN_DIR)/juno-pay-server
 RUST_MANIFEST := rust/keys/Cargo.toml
 ADMIN_DIR := admin-dashboard
 ADMIN_STAMP := $(ADMIN_DIR)/node_modules/.install-stamp
+DEMO_DIR := demo-app
+DEMO_STAMP := $(DEMO_DIR)/node_modules/.install-stamp
 
 build: rust-build
 	@mkdir -p $(BIN_DIR)
@@ -46,7 +48,20 @@ admin-test-unit: admin-deps
 admin-test-e2e: admin-deps
 	cd $(ADMIN_DIR) && npm run test:e2e
 
-test: rust-test test-unit admin-test-unit test-integration test-e2e admin-test-e2e
+$(DEMO_STAMP): $(DEMO_DIR)/package.json $(DEMO_DIR)/package-lock.json
+	cd $(DEMO_DIR) && npm ci
+	@mkdir -p $(@D)
+	@touch $(DEMO_STAMP)
+
+demo-deps: $(DEMO_STAMP)
+
+demo-test-unit: demo-deps
+	cd $(DEMO_DIR) && npm test
+
+demo-test-e2e: demo-deps
+	cd $(DEMO_DIR) && npm run test:e2e
+
+test: rust-test test-unit admin-test-unit demo-test-unit test-integration test-e2e admin-test-e2e demo-test-e2e
 
 fmt:
 	gofmt -w .
