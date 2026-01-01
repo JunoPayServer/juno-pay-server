@@ -28,7 +28,8 @@ export function AdminProvider({ children }: Readonly<{ children: React.ReactNode
       setStatus(s);
     } catch (e) {
       if (e instanceof APIError && e.status === 401) {
-        if (pathname !== "/login") {
+        const clean = pathname.replace(/\/+$/, "");
+        if (!clean.endsWith("/login")) {
           router.replace("/login");
         }
         return;
@@ -71,4 +72,3 @@ export function useAdmin() {
   }
   return v;
 }
-

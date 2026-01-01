@@ -1,6 +1,5 @@
 "use client";
 
-import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ErrorBanner } from "@/components/ErrorBanner";
 import {
@@ -19,8 +18,7 @@ function cloneSettings(s: MerchantSettings): MerchantSettings {
 }
 
 export default function MerchantDetailPage() {
-  const params = useParams<{ merchantId: string }>();
-  const merchantId = params.merchantId;
+  const [merchantID, setMerchantID] = useState("");
 
   const [merchant, setMerchant] = useState<Merchant | null>(null);
   const [settings, setSettings] = useState<MerchantSettings | null>(null);
@@ -37,10 +35,12 @@ export default function MerchantDetailPage() {
   const [createdKey, setCreatedKey] = useState<{ api_key: string; key_id: string } | null>(null);
   const [revokeKeyID, setRevokeKeyID] = useState("");
 
-  async function refresh() {
+  async function refresh(id: string) {
+    const v = id.trim();
+    if (!v) return;
     try {
       setError(null);
-      const m = await getMerchant(merchantId);
+      const m = await getMerchant(v);
       setMerchant(m);
       setSettings(cloneSettings(m.settings));
     } catch (e) {
@@ -52,9 +52,14 @@ export default function MerchantDetailPage() {
   }
 
   useEffect(() => {
-    void refresh();
-  }, [merchantId]);
+    const id = new URLSearchParams(window.location.search).get("merchant_id") ?? "";
+    setMerchantID(id);
+    void refresh(id);
+  }, []);
 
+  if (!merchantID) {
+    return <div className="text-sm text-zinc-600">merchant_id is required.</div>;
+  }
   if (loading && !merchant) {
     return <div className="text-sm text-zinc-600">Loading...</div>;
   }
@@ -77,7 +82,7 @@ export default function MerchantDetailPage() {
           <h2 className="text-sm font-semibold text-zinc-950">Settings</h2>
           <button
             type="button"
-            onClick={() => refresh()}
+            onClick={() => refresh(merchant.merchant_id)}
             className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-950 hover:bg-zinc-50"
           >
             Refresh
@@ -104,9 +109,7 @@ export default function MerchantDetailPage() {
               type="number"
               min={0}
               value={settings.invoice_ttl_seconds}
-              onChange={(e) =>
-                setSettings({ ...settings, invoice_ttl_seconds: Number.parseInt(e.target.value || "0", 10) })
-              }
+              onChange={(e) => setSettings({ ...settings, invoice_ttl_seconds: Number.parseInt(e.target.value || "0", 10) })}
               className="mt-1 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-950 shadow-sm"
             />
           </div>
@@ -116,9 +119,7 @@ export default function MerchantDetailPage() {
               type="number"
               min={0}
               value={settings.required_confirmations}
-              onChange={(e) =>
-                setSettings({ ...settings, required_confirmations: Number.parseInt(e.target.value || "0", 10) })
-              }
+              onChange={(e) => setSettings({ ...settings, required_confirmations: Number.parseInt(e.target.value || "0", 10) })}
               className="mt-1 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-950 shadow-sm"
             />
           </div>
@@ -126,9 +127,7 @@ export default function MerchantDetailPage() {
             <label className="block text-sm font-medium text-zinc-700">Late Payment Policy</label>
             <select
               value={settings.policies.late_payment_policy}
-              onChange={(e) =>
-                setSettings({ ...settings, policies: { ...settings.policies, late_payment_policy: e.target.value } })
-              }
+              onChange={(e) => setSettings({ ...settings, policies: { ...settings.policies, late_payment_policy: e.target.value } })}
               className="mt-1 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-950 shadow-sm"
             >
               <option value="mark_paid_late">mark_paid_late</option>
@@ -140,22 +139,18 @@ export default function MerchantDetailPage() {
             <label className="block text-sm font-medium text-zinc-700">Partial Payment Policy</label>
             <select
               value={settings.policies.partial_payment_policy}
-              onChange={(e) =>
-                setSettings({ ...settings, policies: { ...settings.policies, partial_payment_policy: e.target.value } })
-              }
+              onChange={(e) => setSettings({ ...settings, policies: { ...settings.policies, partial_payment_policy: e.target.value } })}
               className="mt-1 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-950 shadow-sm"
             >
               <option value="accept_partial">accept_partial</option>
-              <option value="reject">reject</option>
+              <option value="reject_partial">reject_partial</option>
             </select>
           </div>
           <div>
             <label className="block text-sm font-medium text-zinc-700">Overpayment Policy</label>
             <select
               value={settings.policies.overpayment_policy}
-              onChange={(e) =>
-                setSettings({ ...settings, policies: { ...settings.policies, overpayment_policy: e.target.value } })
-              }
+              onChange={(e) => setSettings({ ...settings, policies: { ...settings.policies, overpayment_policy: e.target.value } })}
               className="mt-1 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-950 shadow-sm"
             >
               <option value="mark_overpaid">mark_overpaid</option>
@@ -164,10 +159,7 @@ export default function MerchantDetailPage() {
           </div>
 
           <div className="sm:col-span-2">
-            <button
-              type="submit"
-              className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800"
-            >
+            <button type="submit" className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800">
               Save Settings
             </button>
           </div>
@@ -217,19 +209,11 @@ export default function MerchantDetailPage() {
           </div>
           <div>
             <label className="block text-sm font-medium text-zinc-700">Chain</label>
-            <input
-              value={chain}
-              onChange={(e) => setChain(e.target.value)}
-              className="mt-1 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-950 shadow-sm"
-            />
+            <input value={chain} onChange={(e) => setChain(e.target.value)} className="mt-1 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-950 shadow-sm" />
           </div>
           <div>
             <label className="block text-sm font-medium text-zinc-700">UA HRP</label>
-            <input
-              value={uaHRP}
-              onChange={(e) => setUAHRP(e.target.value)}
-              className="mt-1 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-950 shadow-sm"
-            />
+            <input value={uaHRP} onChange={(e) => setUAHRP(e.target.value)} className="mt-1 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-950 shadow-sm" />
           </div>
           <div>
             <label className="block text-sm font-medium text-zinc-700">Coin Type</label>
@@ -242,10 +226,7 @@ export default function MerchantDetailPage() {
             />
           </div>
           <div className="sm:col-span-2">
-            <button
-              type="submit"
-              className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800"
-            >
+            <button type="submit" className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800">
               Set Wallet
             </button>
           </div>
@@ -279,10 +260,7 @@ export default function MerchantDetailPage() {
                 className="mt-1 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-950 shadow-sm"
               />
             </div>
-            <button
-              type="submit"
-              className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800"
-            >
+            <button type="submit" className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800">
               Create API Key
             </button>
 
@@ -320,16 +298,17 @@ export default function MerchantDetailPage() {
                 placeholder="key_..."
               />
             </div>
-            <button
-              type="submit"
-              className="rounded-md border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-950 hover:bg-zinc-50"
-            >
+            <button type="submit" className="rounded-md border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-950 hover:bg-zinc-50">
               Revoke
             </button>
           </form>
         </div>
 
-        {error ? <div className="mt-4"><ErrorBanner message={error} /></div> : null}
+        {error ? (
+          <div className="mt-4">
+            <ErrorBanner message={error} />
+          </div>
+        ) : null}
       </section>
     </div>
   );

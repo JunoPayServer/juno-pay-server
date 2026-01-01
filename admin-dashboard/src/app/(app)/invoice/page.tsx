@@ -1,6 +1,5 @@
 "use client";
 
-import { useParams } from "next/navigation";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { ErrorBanner } from "@/components/ErrorBanner";
@@ -16,18 +15,18 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
 }
 
 export default function InvoiceDetailPage() {
-  const params = useParams<{ invoiceId: string }>();
-  const invoiceId = params.invoiceId;
-
+  const [invoiceID, setInvoiceID] = useState("");
   const [inv, setInv] = useState<Invoice | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  async function refresh() {
+  async function refresh(id: string) {
+    const v = id.trim();
+    if (!v) return;
     try {
       setError(null);
-      const v = await getInvoice(invoiceId);
-      setInv(v);
+      const out = await getInvoice(v);
+      setInv(out);
     } catch (e) {
       if (e instanceof APIError && e.status === 401) return;
       setError(e instanceof Error ? e.message : "load failed");
@@ -37,9 +36,14 @@ export default function InvoiceDetailPage() {
   }
 
   useEffect(() => {
-    void refresh();
-  }, [invoiceId]);
+    const id = new URLSearchParams(window.location.search).get("invoice_id") ?? "";
+    setInvoiceID(id);
+    void refresh(id);
+  }, []);
 
+  if (!invoiceID) {
+    return <div className="text-sm text-zinc-600">invoice_id is required.</div>;
+  }
   if (loading && !inv) {
     return <div className="text-sm text-zinc-600">Loading...</div>;
   }
@@ -59,7 +63,7 @@ export default function InvoiceDetailPage() {
         </div>
         <button
           type="button"
-          onClick={() => refresh()}
+          onClick={() => refresh(inv.invoice_id)}
           className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-950 hover:bg-zinc-50"
         >
           Refresh
@@ -84,10 +88,7 @@ export default function InvoiceDetailPage() {
       <section className="rounded-lg border border-zinc-200 bg-white p-4">
         <h2 className="text-sm font-semibold text-zinc-950">Actions</h2>
         <div className="mt-3 text-sm text-zinc-700">
-          <Link
-            href={`/deposits?invoice_id=${encodeURIComponent(inv.invoice_id)}`}
-            className="font-medium text-zinc-950 hover:underline"
-          >
+          <Link href={`/deposits?invoice_id=${encodeURIComponent(inv.invoice_id)}`} className="font-medium text-zinc-950 hover:underline">
             View deposits for this invoice
           </Link>
         </div>

@@ -10,9 +10,8 @@ export default defineConfig({
   },
   webServer: {
     command: "node e2e/serve.js",
-    url: `http://127.0.0.1:${frontPort}`,
+    url: `http://127.0.0.1:${frontPort}/admin/`,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
   },
 });
-

@@ -5,11 +5,11 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
+    "start": "node scripts/serve-out.js",
     "lint": "eslint",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "JUNO_PAY_BASE_URL=http://127.0.0.1:39080 next build && playwright test"
+    "test:e2e": "next build && playwright test"
   },
   "dependencies": {
     "next": "16.1.1",

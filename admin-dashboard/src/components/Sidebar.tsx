@@ -3,9 +3,17 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
+function cleanPath(p: string) {
+  const v = p.replace(/\/+$/, "");
+  return v === "" ? "/" : v;
+}
+
 function NavLink({ href, label }: { href: string; label: string }) {
   const pathname = usePathname();
-  const active = pathname === href || (href !== "/" && pathname.startsWith(href + "/"));
+  const withoutBase = pathname.startsWith("/admin") ? pathname.slice("/admin".length) || "/" : pathname;
+  const cur = cleanPath(withoutBase);
+  const target = cleanPath(href);
+  const active = cur === target || (target !== "/" && cur.startsWith(target + "/"));
 
   return (
     <Link
@@ -42,4 +50,3 @@ export function Sidebar() {
     </aside>
   );
 }
-

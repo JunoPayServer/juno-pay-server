@@ -1,18 +1,31 @@
 /* eslint-disable no-console */
 
 const http = require("node:http");
-const { spawn } = require("node:child_process");
-const { randomBytes } = require("node:crypto");
 const path = require("node:path");
+const fs = require("node:fs");
+const { randomBytes } = require("node:crypto");
 
-const backendPort = Number.parseInt(process.env.E2E_BACKEND_PORT ?? "39080", 10);
-const frontendPort = Number.parseInt(process.env.E2E_FRONTEND_PORT ?? "39081", 10);
+const port = Number.parseInt(process.env.E2E_FRONTEND_PORT ?? "39081", 10);
 const adminPassword = process.env.E2E_ADMIN_PASSWORD ?? "test-admin-password";
 
 const state = {
   merchants: [],
   nextMerchantN: 1,
 };
+
+const outDir = path.resolve(__dirname, "../out");
+const basePath = "/admin";
+
+const types = new Map([
+  [".html", "text/html; charset=utf-8"],
+  [".js", "application/javascript; charset=utf-8"],
+  [".css", "text/css; charset=utf-8"],
+  [".ico", "image/x-icon"],
+  [".svg", "image/svg+xml"],
+  [".txt", "text/plain; charset=utf-8"],
+  [".woff2", "font/woff2"],
+  [".json", "application/json; charset=utf-8"],
+]);
 
 function nowRFC3339() {
   return new Date().toISOString();
@@ -60,7 +73,66 @@ function requireAuth(req, res) {
   return false;
 }
 
-const backend = http.createServer(async (req, res) => {
+function safeJoin(root, rel) {
+  const full = path.resolve(root, rel);
+  const rootFull = path.resolve(root) + path.sep;
+  if (!full.startsWith(rootFull)) return null;
+  return full;
+}
+
+function sendText(res, status, body) {
+  res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8" });
+  res.end(body);
+}
+
+function serveStatic(res, reqPath) {
+  if (reqPath === basePath) {
+    res.statusCode = 307;
+    res.setHeader("Location", `${basePath}/`);
+    res.end();
+    return true;
+  }
+  if (!reqPath.startsWith(basePath + "/")) return false;
+
+  let rel = reqPath.slice(basePath.length); // includes leading /
+  try {
+    rel = decodeURIComponent(rel);
+  } catch {
+    return false;
+  }
+  if (rel.endsWith("/")) rel += "index.html";
+  rel = rel.replace(/^\/+/, "");
+
+  const full = safeJoin(outDir, rel);
+  if (!full) return false;
+
+  let st;
+  try {
+    st = fs.statSync(full);
+  } catch {
+    const notFound = safeJoin(outDir, "404.html");
+    if (notFound && fs.existsSync(notFound)) {
+      res.writeHead(404, { "Content-Type": "text/html; charset=utf-8" });
+      fs.createReadStream(notFound).pipe(res);
+      return true;
+    }
+    sendText(res, 404, "not found\n");
+    return true;
+  }
+
+  if (st.isDirectory()) {
+    sendText(res, 404, "not found\n");
+    return true;
+  }
+
+  const ext = path.extname(full);
+  const ct = types.get(ext) ?? "application/octet-stream";
+  res.writeHead(200, { "Content-Type": ct });
+  fs.createReadStream(full).pipe(res);
+  return true;
+}
+
+const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
 
@@ -137,36 +209,16 @@ const backend = http.createServer(async (req, res) => {
       return sendJSON(res, 201, { status: "ok", data: m });
     }
 
+    if (req.method === "GET" || req.method === "HEAD") {
+      if (serveStatic(res, url.pathname)) return;
+    }
+
     sendJSON(res, 404, { status: "error", error: { code: "not_found", message: "not found" } });
   } catch (e) {
     sendJSON(res, 500, { status: "error", error: { code: "internal", message: e instanceof Error ? e.message : "internal error" } });
   }
 });
 
-backend.listen(backendPort, "127.0.0.1", () => {
-  console.log(`[e2e] mock backend on http://127.0.0.1:${backendPort}`);
+server.listen(port, "127.0.0.1", () => {
+  console.log(`[e2e] serving admin UI at http://127.0.0.1:${port}${basePath}/`);
 });
-
-const nextBin = path.resolve(__dirname, "../node_modules/.bin/next");
-const nextProc = spawn(nextBin, ["start", "-p", String(frontendPort)], {
-  stdio: "inherit",
-  env: {
-    ...process.env,
-    JUNO_PAY_BASE_URL: `http://127.0.0.1:${backendPort}`,
-    NEXT_TELEMETRY_DISABLED: "1",
-  },
-});
-
-function shutdown() {
-  backend.close();
-  nextProc.kill("SIGTERM");
-}
-
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
-
-nextProc.on("exit", (code) => {
-  backend.close();
-  process.exit(code ?? 0);
-});
-

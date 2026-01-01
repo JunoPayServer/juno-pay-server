@@ -116,7 +116,7 @@ export default function InvoicesPage() {
                   <tr key={inv.invoice_id} className="text-sm text-zinc-950">
                     <td className="border-b border-zinc-100 px-3 py-2">
                       <div className="font-medium">
-                        <Link href={`/invoices/${encodeURIComponent(inv.invoice_id)}`} className="hover:underline">
+                        <Link href={`/invoice?invoice_id=${encodeURIComponent(inv.invoice_id)}`} className="hover:underline">
                           {inv.external_order_id}
                         </Link>
                       </div>
@@ -143,4 +143,3 @@ export default function InvoicesPage() {
     </div>
   );
 }
-
