@@ -1,4 +1,4 @@
-.PHONY: build rust-build rust-test test test-unit test-integration test-e2e admin-deps admin-test-unit admin-test-e2e demo-deps demo-test-unit demo-test-e2e fmt tidy clean
+.PHONY: build rust-build rust-test test test-unit test-integration test-e2e admin-deps admin-build admin-test-unit admin-test-e2e demo-deps demo-build demo-test-unit demo-test-e2e fmt tidy clean
 
 TESTFLAGS ?=
 
@@ -42,6 +42,9 @@ $(ADMIN_STAMP): $(ADMIN_DIR)/package.json $(ADMIN_DIR)/package-lock.json
 
 admin-deps: $(ADMIN_STAMP)
 
+admin-build: admin-deps
+	cd $(ADMIN_DIR) && npm run build
+
 admin-test-unit: admin-deps
 	cd $(ADMIN_DIR) && npm test
 
@@ -54,6 +57,9 @@ $(DEMO_STAMP): $(DEMO_DIR)/package.json $(DEMO_DIR)/package-lock.json
 	@touch $(DEMO_STAMP)
 
 demo-deps: $(DEMO_STAMP)
+
+demo-build: demo-deps
+	cd $(DEMO_DIR) && npm run build
 
 demo-test-unit: demo-deps
 	cd $(DEMO_DIR) && npm test
