@@ -1,0 +1,99 @@
+services:
+  junocashd:
+    container_name: juno-pay-server-junocashd
+    platform: linux/amd64
+    image: juno-pay-server/junocashd:${JUNOCASH_VERSION:-0.9.7}
+    build:
+      context: .
+      dockerfile: docker/junocashd/Dockerfile
+      args:
+        JUNOCASH_VERSION: ${JUNOCASH_VERSION:-0.9.7}
+    environment:
+      JUNO_CHAIN: ${JUNO_CHAIN:-regtest}
+      JUNO_DATADIR: /data
+      JUNO_RPC_USER: rpcuser
+      JUNO_RPC_PASS: rpcpass
+      JUNO_RPC_PORT: 8232
+    command:
+      - -server=1
+      - -txindex=1
+      - -daemon=0
+      - -printtoconsole=1
+      - -datadir=/data
+      - -rpcbind=0.0.0.0
+      - -rpcallowip=0.0.0.0/0
+      - -rpcport=8232
+      - -rpcuser=rpcuser
+      - -rpcpassword=rpcpass
+    ports:
+      - "${JUNO_RPC_PORT_HOST:-28232}:8232"
+    volumes:
+      - junocashd-data:/data
+    healthcheck:
+      test: ["CMD", "juno-cli", "getblockcount"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  juno-scan:
+    container_name: juno-pay-server-scan
+    platform: linux/amd64
+    image: juno-pay-server/juno-scan:${JUNO_SCAN_REF:-main}
+    build:
+      context: .
+      dockerfile: docker/juno-scan/Dockerfile
+      args:
+        JUNO_SCAN_REPO: ${JUNO_SCAN_REPO:-https://github.com/Abdullah1738/juno-scan.git}
+        JUNO_SCAN_REF: ${JUNO_SCAN_REF:-main}
+    depends_on:
+      junocashd:
+        condition: service_healthy
+    environment:
+      JUNO_SCAN_LISTEN: 0.0.0.0:8080
+      JUNO_SCAN_RPC_URL: http://junocashd:8232
+      JUNO_SCAN_RPC_USER: rpcuser
+      JUNO_SCAN_RPC_PASS: rpcpass
+      JUNO_SCAN_UA_HRP: ${JUNO_SCAN_UA_HRP:-jregtest}
+      JUNO_SCAN_CONFIRMATIONS: ${JUNO_SCAN_CONFIRMATIONS:-100}
+      JUNO_SCAN_DB_DRIVER: rocksdb
+      JUNO_SCAN_DB_PATH: /data/db
+    ports:
+      - "${JUNO_SCAN_PORT_HOST:-18080}:8080"
+    volumes:
+      - junoscan-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/v1/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+  juno-pay-server:
+    container_name: juno-pay-server
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      junocashd:
+        condition: service_healthy
+      juno-scan:
+        condition: service_healthy
+    environment:
+      JUNO_PAY_ADDR: 0.0.0.0:8080
+      JUNO_PAY_ADMIN_PASSWORD: ${JUNO_PAY_ADMIN_PASSWORD:?set in .env}
+      JUNO_PAY_TOKEN_KEY_HEX: ${JUNO_PAY_TOKEN_KEY_HEX:?set in .env}
+      JUNO_PAY_DATA_DIR: /data
+      JUNO_SCAN_URL: http://juno-scan:8080
+      JUNO_CASHD_RPC_URL: http://junocashd:8232
+      JUNO_CASHD_RPC_USER: rpcuser
+      JUNO_CASHD_RPC_PASS: rpcpass
+    ports:
+      - "${JUNO_PAY_PORT_HOST:-18082}:8080"
+    volumes:
+      - payserver-data:/data
+
+volumes:
+  junocashd-data:
+  junoscan-data:
+  payserver-data:
+
