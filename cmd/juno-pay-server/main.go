@@ -72,6 +72,7 @@ func main() {
 		realClock{},
 		randTokenGen{},
 		api.WithAdminPassword(adminPassword),
+		api.WithAdminUI(defaultAdminUIDir()),
 		api.WithScannerHealth(sc),
 	)
 	if err != nil {
@@ -131,6 +132,16 @@ func defaultDataDir() string {
 		return filepath.Join(home, ".juno-pay-server")
 	}
 	return ".juno-pay-server"
+}
+
+func defaultAdminUIDir() string {
+	if v, ok := os.LookupEnv("JUNO_PAY_ADMIN_UI_DIR"); ok {
+		return strings.TrimSpace(v)
+	}
+	if _, err := os.Stat("admin-dashboard/out"); err == nil {
+		return "admin-dashboard/out"
+	}
+	return ""
 }
 
 func parsePollInterval(ms string) time.Duration {

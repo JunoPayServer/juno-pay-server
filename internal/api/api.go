@@ -9,8 +9,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -72,6 +74,7 @@ type Server struct {
 	tokenGen TokenGenerator
 
 	scanHealth ScannerHealth
+	adminUI    http.Handler
 
 	adminEnabled    bool
 	adminPassHash   [32]byte
@@ -131,6 +134,24 @@ func WithScannerHealth(h ScannerHealth) Option {
 	}
 }
 
+func WithAdminUI(dir string) Option {
+	return func(s *Server) error {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			return nil
+		}
+		info, err := os.Stat(dir)
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("admin ui dir is not a directory: %s", dir)
+		}
+		s.adminUI = newAdminUIHandler(dir)
+		return nil
+	}
+}
+
 func (s *Server) observeUptime(now time.Time, uptimeSeconds int64) (restartsDetected int64, lastRestartAt *time.Time) {
 	if s == nil {
 		return 0, nil
@@ -160,6 +181,16 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/admin/login", s.handleAdminLogin)
 	mux.HandleFunc("/admin/logout", s.handleAdminLogout)
+	if s.adminUI != nil {
+		mux.Handle("/admin/", s.adminUI)
+		mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			http.Redirect(w, r, "/admin/", http.StatusTemporaryRedirect)
+		})
+	}
 	mux.HandleFunc("/v1/health", s.handleHealth)
 	mux.HandleFunc("/v1/status", s.handleStatus)
 	mux.HandleFunc("/v1/invoices", s.handleInvoices)
@@ -648,6 +679,10 @@ func toInvoiceJSON(inv domain.Invoice) map[string]any {
 }
 
 func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet && s.adminUI != nil {
+		http.Redirect(w, r, "/admin/login/", http.StatusTemporaryRedirect)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -684,6 +719,10 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet && s.adminUI != nil {
+		http.Redirect(w, r, "/admin/", http.StatusTemporaryRedirect)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
