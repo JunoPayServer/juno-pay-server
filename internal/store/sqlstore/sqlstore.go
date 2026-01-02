@@ -2,7 +2,6 @@ package sqlstore
 
 import (
 	"context"
-	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
@@ -11,13 +10,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
-
-	_ "modernc.org/sqlite"
 
 	"github.com/Abdullah1738/juno-pay-server/internal/domain"
 	"github.com/Abdullah1738/juno-pay-server/internal/store"
@@ -44,39 +39,9 @@ type dialect interface {
 	isAlreadyExists(err error) bool
 }
 
-func Open(dataDir string, tokenKey []byte) (*Store, error) {
-	dataDir = filepath.Clean(strings.TrimSpace(dataDir))
-	if dataDir == "" || dataDir == "." || dataDir == string(os.PathSeparator) {
-		return nil, errors.New("sqlite: invalid data dir")
-	}
-	if len(tokenKey) != 32 {
-		return nil, errors.New("sqlite: token key must be 32 bytes")
-	}
-
-	block, err := aes.NewCipher(tokenKey)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: aes: %w", err)
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: gcm: %w", err)
-	}
-
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return nil, fmt.Errorf("sqlite: mkdir: %w", err)
-	}
-
-	dbPath := filepath.Join(dataDir, "state.sqlite")
-	dsn := "file:" + dbPath + "?_pragma=busy_timeout(5000)"
-
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: open: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-
-	return &Store{db: db, aead: aead, dialect: sqliteDialect{}}, nil
+func hash32Bytes(s string) []byte {
+	sum := sha256.Sum256([]byte(s))
+	return sum[:]
 }
 
 func (s *Store) Close() error {
@@ -599,20 +564,23 @@ func (s *Store) CreateInvoice(ctx context.Context, req store.InvoiceCreate) (dom
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	extOrderHash := hash32Bytes(req.ExternalOrderID)
+	addrHash := hash32Bytes(req.Address)
+
 	_, err = tx.ExecContext(ctx, s.q(`
 		INSERT INTO invoices (
-			invoice_id, merchant_id, external_order_id,
-			wallet_id, address_index, address,
+			invoice_id, merchant_id, external_order_id, external_order_id_hash,
+			wallet_id, address_index, address, address_hash,
 			created_after_height, created_after_hash,
 			amount_zat, required_confirmations,
 			policy_late_payment, policy_partial_payment, policy_overpayment,
 			received_pending_zat, received_confirmed_zat,
 			status, expires_at,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)
 	`),
-		id, req.MerchantID, req.ExternalOrderID,
-		req.WalletID, req.AddressIndex, req.Address,
+		id, req.MerchantID, req.ExternalOrderID, extOrderHash,
+		req.WalletID, req.AddressIndex, req.Address, addrHash,
 		req.CreatedAfterHeight, strings.TrimSpace(req.CreatedAfterHash),
 		req.AmountZat, req.RequiredConfirmations,
 		string(req.Policies.LatePayment), string(req.Policies.PartialPayment), string(req.Policies.Overpayment),
@@ -650,15 +618,18 @@ func (s *Store) CreateInvoice(ctx context.Context, req store.InvoiceCreate) (dom
 		return domain.Invoice{}, false, err
 	}
 
-	// Idempotent replay: fetch existing invoice by (merchant_id, external_order_id)
-	existing, ok, err := s.findInvoiceTx(ctx, tx, req.MerchantID, req.ExternalOrderID)
+	// Idempotent replay: fetch existing invoice by (merchant_id, external_order_id_hash).
+	existing, ok, err := s.findInvoiceTx(ctx, tx, req.MerchantID, req.ExternalOrderID, extOrderHash)
 	if err != nil {
 		return domain.Invoice{}, false, err
 	}
 	if !ok {
 		return domain.Invoice{}, false, store.ErrConflict
 	}
-	if existing.AmountZat != req.AmountZat {
+	if existing.ExternalOrderID != req.ExternalOrderID {
+		return domain.Invoice{}, false, store.ErrConflict
+	}
+	if existing.AmountZat != req.AmountZat || existing.WalletID != req.WalletID || existing.Address != req.Address {
 		return domain.Invoice{}, false, store.ErrConflict
 	}
 	return existing, false, nil
@@ -701,6 +672,7 @@ func (s *Store) FindInvoiceByExternalOrderID(ctx context.Context, merchantID, ex
 		return domain.Invoice{}, false, nil
 	}
 
+	extHash := hash32Bytes(externalOrderID)
 	rows, err := s.db.QueryContext(ctx, s.q(`
 		SELECT invoice_id, merchant_id, external_order_id, wallet_id, address_index, address, created_after_height, created_after_hash,
 		       amount_zat, required_confirmations,
@@ -708,9 +680,9 @@ func (s *Store) FindInvoiceByExternalOrderID(ctx context.Context, merchantID, ex
 		       received_pending_zat, received_confirmed_zat,
 		       status, expires_at, created_at, updated_at
 		FROM invoices
-		WHERE merchant_id = ? AND external_order_id = ?
+		WHERE merchant_id = ? AND external_order_id_hash = ? AND external_order_id = ?
 		LIMIT 1
-	`), merchantID, externalOrderID)
+	`), merchantID, extHash, externalOrderID)
 	if err != nil {
 		return domain.Invoice{}, false, err
 	}
@@ -735,7 +707,7 @@ func (s *Store) ListInvoices(ctx context.Context, f store.InvoiceFilter) ([]doma
 		f.Limit = 100
 	}
 
-	where := []string{"rowid > ?"}
+	where := []string{"seq > ?"}
 	args := []any{f.AfterID}
 
 	if f.MerchantID != "" {
@@ -747,13 +719,13 @@ func (s *Store) ListInvoices(ctx context.Context, f store.InvoiceFilter) ([]doma
 		args = append(args, string(f.Status))
 	}
 	if f.ExternalOrderID != "" {
-		where = append(where, "external_order_id = ?")
-		args = append(args, f.ExternalOrderID)
+		where = append(where, "external_order_id_hash = ? AND external_order_id = ?")
+		args = append(args, hash32Bytes(f.ExternalOrderID), f.ExternalOrderID)
 	}
 
 	args = append(args, f.Limit)
 	q := `
-		SELECT rowid,
+		SELECT seq,
 		       invoice_id, merchant_id, external_order_id, wallet_id, address_index, address, created_after_height, created_after_hash,
 		       amount_zat, required_confirmations,
 		       policy_late_payment, policy_partial_payment, policy_overpayment,
@@ -761,7 +733,7 @@ func (s *Store) ListInvoices(ctx context.Context, f store.InvoiceFilter) ([]doma
 		       status, expires_at, created_at, updated_at
 		FROM invoices
 		WHERE ` + strings.Join(where, " AND ") + `
-		ORDER BY rowid
+		ORDER BY seq
 		LIMIT ?
 	`
 
@@ -1155,14 +1127,14 @@ func (s *Store) ListDeposits(ctx context.Context, f store.DepositFilter) (deposi
 	}
 
 	base := `
-		SELECT d.rowid,
+		SELECT d.seq,
 		       d.wallet_id, d.txid, d.action_index, d.recipient_address, d.amount_zat, d.height,
 		       d.status, d.confirmed_height, d.invoice_id,
 		       d.detected_at, d.updated_at
 		FROM deposits d
 	`
 
-	where := []string{"d.rowid > ?"}
+	where := []string{"d.seq > ?"}
 	args := []any{f.AfterID}
 
 	if f.MerchantID != "" {
@@ -1182,7 +1154,7 @@ func (s *Store) ListDeposits(ctx context.Context, f store.DepositFilter) (deposi
 	args = append(args, f.Limit)
 	q := base + `
 		WHERE ` + strings.Join(where, " AND ") + `
-		ORDER BY d.rowid
+		ORDER BY d.seq
 		LIMIT ?
 	`
 
@@ -2019,7 +1991,7 @@ func (s *Store) UpdateEventDelivery(ctx context.Context, deliveryID string, stat
 	return nil
 }
 
-func (s *Store) findInvoiceTx(ctx context.Context, tx *sql.Tx, merchantID, externalOrderID string) (domain.Invoice, bool, error) {
+func (s *Store) findInvoiceTx(ctx context.Context, tx *sql.Tx, merchantID, externalOrderID string, externalOrderIDHash []byte) (domain.Invoice, bool, error) {
 	rows, err := tx.QueryContext(ctx, s.q(`
 		SELECT invoice_id, merchant_id, external_order_id, wallet_id, address_index, address, created_after_height, created_after_hash,
 		       amount_zat, required_confirmations,
@@ -2027,9 +1999,9 @@ func (s *Store) findInvoiceTx(ctx context.Context, tx *sql.Tx, merchantID, exter
 		       received_pending_zat, received_confirmed_zat,
 		       status, expires_at, created_at, updated_at
 		FROM invoices
-		WHERE merchant_id = ? AND external_order_id = ?
+		WHERE merchant_id = ? AND external_order_id_hash = ?
 		LIMIT 1
-	`), merchantID, externalOrderID)
+	`), merchantID, externalOrderIDHash)
 	if err != nil {
 		return domain.Invoice{}, false, err
 	}
@@ -2040,6 +2012,9 @@ func (s *Store) findInvoiceTx(ctx context.Context, tx *sql.Tx, merchantID, exter
 	inv, err := scanInvoiceFull(rows)
 	if err != nil {
 		return domain.Invoice{}, false, err
+	}
+	if inv.ExternalOrderID != externalOrderID {
+		return domain.Invoice{}, false, nil
 	}
 	return inv, true, nil
 }
@@ -2394,6 +2369,7 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 	}
 
 	addr := strings.ToLower(strings.TrimSpace(recipientAddress))
+	addrHash := hash32Bytes(addr)
 
 	// Find invoice by address (if any).
 	var invoiceID sql.NullString
@@ -2401,9 +2377,9 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 	err := tx.QueryRowContext(ctx, s.q(`
 		SELECT invoice_id, created_after_height
 		FROM invoices
-		WHERE wallet_id = ? AND address = ?
+		WHERE wallet_id = ? AND address_hash = ?
 		LIMIT 1
-	`), walletID, addr).Scan(&invoiceID, &invoiceCreatedAfterHeight)
+	`), walletID, addrHash).Scan(&invoiceID, &invoiceCreatedAfterHeight)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
@@ -2431,6 +2407,7 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 	res, err := tx.ExecContext(ctx, s.q(`
 		UPDATE deposits
 		SET recipient_address = ?,
+		    recipient_address_hash = ?,
 		    amount_zat = ?,
 		    height = ?,
 		    status = ?,
@@ -2439,7 +2416,7 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 		    updated_at = ?
 		WHERE wallet_id = ? AND txid = ? AND action_index = ?
 	`),
-		addr, amountZat, height, status, confirmedHeightAny, invoiceIDAny, updatedAtUnix,
+		addr, addrHash, amountZat, height, status, confirmedHeightAny, invoiceIDAny, updatedAtUnix,
 		walletID, txid, actionIndex,
 	)
 	if err != nil {
@@ -2449,11 +2426,11 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 		_, err := tx.ExecContext(ctx, s.q(`
 			INSERT INTO deposits (
 				wallet_id, txid, action_index,
-				recipient_address, amount_zat, height,
+				recipient_address, recipient_address_hash, amount_zat, height,
 				status, confirmed_height, invoice_id,
 				detected_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`), walletID, txid, actionIndex, addr, amountZat, height, status, confirmedHeightAny, invoiceIDAny, detectedAtUnix, updatedAtUnix)
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`), walletID, txid, actionIndex, addr, addrHash, amountZat, height, status, confirmedHeightAny, invoiceIDAny, detectedAtUnix, updatedAtUnix)
 		if err != nil && !s.dialect.isUniqueViolation(err) {
 			return err
 		}
@@ -2462,6 +2439,7 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 			if _, err := tx.ExecContext(ctx, s.q(`
 				UPDATE deposits
 				SET recipient_address = ?,
+				    recipient_address_hash = ?,
 				    amount_zat = ?,
 				    height = ?,
 				    status = ?,
@@ -2470,7 +2448,7 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 				    updated_at = ?
 				WHERE wallet_id = ? AND txid = ? AND action_index = ?
 			`),
-				addr, amountZat, height, status, confirmedHeightAny, invoiceIDAny, updatedAtUnix,
+				addr, addrHash, amountZat, height, status, confirmedHeightAny, invoiceIDAny, updatedAtUnix,
 				walletID, txid, actionIndex,
 			); err != nil {
 				return err
@@ -2555,19 +2533,19 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 
 	// Recompute invoice aggregates.
 	var pendingSum int64
-	if err := tx.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, s.q(`
 		SELECT COALESCE(SUM(amount_zat), 0)
 		FROM deposits
 		WHERE invoice_id = ? AND status IN ('detected','unconfirmed')
-	`, applyInvoiceID).Scan(&pendingSum); err != nil {
+	`), applyInvoiceID).Scan(&pendingSum); err != nil {
 		return err
 	}
 	var confirmedSum int64
-	if err := tx.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, s.q(`
 		SELECT COALESCE(SUM(amount_zat), 0)
 		FROM deposits
 		WHERE invoice_id = ? AND status = 'confirmed'
-	`, applyInvoiceID).Scan(&confirmedSum); err != nil {
+	`), applyInvoiceID).Scan(&confirmedSum); err != nil {
 		return err
 	}
 
@@ -2580,25 +2558,25 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 		invPartial    string
 		invOverpay    string
 	)
-	if err := tx.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, s.q(`
 		SELECT merchant_id, amount_zat, status, expires_at, policy_late_payment, policy_partial_payment, policy_overpayment
 		FROM invoices
 		WHERE invoice_id = ?
-	`, applyInvoiceID).Scan(&invMerchantID, &invAmount, &invStatus, &invExpires, &invLatePolicy, &invPartial, &invOverpay); err != nil {
+	`), applyInvoiceID).Scan(&invMerchantID, &invAmount, &invStatus, &invExpires, &invLatePolicy, &invPartial, &invOverpay); err != nil {
 		return err
 	}
 
 	expired := invExpires.Valid && now.Unix() > invExpires.Int64
 	newStatus := computeInvoiceStatusSQL(invAmount, confirmedSum, expired, domain.LatePaymentPolicy(invLatePolicy))
 
-	_, err = tx.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, s.q(`
 		UPDATE invoices
 		SET received_pending_zat = ?,
 		    received_confirmed_zat = ?,
 		    status = ?,
 		    updated_at = ?
 		WHERE invoice_id = ?
-	`, pendingSum, confirmedSum, string(newStatus), updatedAtUnix, applyInvoiceID)
+	`), pendingSum, confirmedSum, string(newStatus), updatedAtUnix, applyInvoiceID)
 	if err != nil {
 		return err
 	}
@@ -2771,6 +2749,9 @@ var baseIdents = []string{
 	// Indexes.
 	"idx_api_keys_token_hash",
 	"idx_deposits_invoice_status",
+	"idx_deposits_wallet_recipient_hash",
+	"idx_invoices_merchant_seq",
+	"idx_invoices_merchant_status_seq",
 	"idx_refunds_merchant_id",
 	"idx_refunds_invoice_id",
 	"idx_review_cases_merchant_status",
