@@ -47,7 +47,11 @@ docker compose up -d --build
 - `JUNO_PAY_ADMIN_UI_DIR` (optional): directory containing exported admin UI (serves under `/admin/`).
   - If unset and `admin-dashboard/out` exists, it is used.
   - In the Docker image, the UI is baked in and this is set automatically.
-- `JUNO_PAY_DATA_DIR` (default `~/.juno-pay-server`): data directory for embedded SQLite.
+- `JUNO_PAY_STORE_DRIVER` (default `sqlite`): `sqlite|postgres|mysql|mongo`.
+- `JUNO_PAY_STORE_DSN` (required for `postgres|mysql|mongo`): connection string / URI.
+- `JUNO_PAY_STORE_DB` (required for `mongo`): database name.
+- `JUNO_PAY_STORE_PREFIX` (optional): table/collection prefix (useful when sharing a DB with other apps).
+- `JUNO_PAY_DATA_DIR` (default `~/.juno-pay-server`): data directory for embedded SQLite (ignored for non-sqlite drivers).
 - `JUNO_PAY_TOKEN_KEY_HEX` (**required**): 32-byte hex key used to encrypt invoice checkout tokens in the DB.
 - `JUNO_SCAN_URL` (**required**): base URL of `juno-scan` (example `http://127.0.0.1:18080`).
 - `JUNO_CASHD_RPC_URL` (default `http://127.0.0.1:8232`): `junocashd` RPC URL.
@@ -57,12 +61,18 @@ docker compose up -d --build
 - `JUNO_PAY_OUTBOX_BATCH_SIZE` (default `100`): max deliveries per poll.
 - `JUNO_PAY_OUTBOX_MAX_ATTEMPTS` (default `25`): max delivery attempts before marking failed.
 
-### Storage (embedded SQLite)
+### Storage
 
-The server uses embedded SQLite (via `modernc.org/sqlite`) stored under `JUNO_PAY_DATA_DIR`.
+Supported store drivers:
+
+- `sqlite` (default): embedded SQLite (via `modernc.org/sqlite`) stored under `JUNO_PAY_DATA_DIR`.
+- `postgres`: PostgreSQL (tables created automatically; use `JUNO_PAY_STORE_PREFIX` to namespace tables).
+- `mysql`: MySQL (tables created automatically; use `JUNO_PAY_STORE_PREFIX` to namespace tables).
+- `mongo`: MongoDB (collections created automatically; requires a replica set for transactions).
 
 Operational notes:
-- Treat the data directory as stateful (back it up).
+- For `sqlite`, treat the data directory as stateful (use block storage + backups).
+- For `postgres|mysql|mongo`, DB backups/HA are your responsibility.
 - If you wipe the DB and reuse the same UFVKs, late payments to previously-issued addresses may be attributed to newly-created invoices.
 
 ## Admin dashboard
@@ -82,6 +92,15 @@ npm run build
 ```
 
 Then run `juno-pay-server` with `JUNO_PAY_ADMIN_UI_DIR=admin-dashboard/out` (or just run from repo root; it auto-detects `admin-dashboard/out`).
+
+Typical admin flow:
+
+1. Create a merchant (configures invoice expiry + confirmations + payment policies).
+2. Set the merchant wallet UFVK (immutable; this is the only chain secret the backend needs).
+3. Create merchant API keys (used only for invoice creation).
+4. Configure event sinks (webhook and/or brokers) for invoice/settlement events.
+5. Monitor `/status` for scanner cursor progress, restarts, and delivery backlog.
+6. Review deposits, invoices, and review cases; optionally create refunds (record + event emission).
 
 ## Outbound events (webhooks + brokers)
 
@@ -106,7 +125,7 @@ See `api/openapi.yaml` for exact schemas.
 A production deployment typically looks like:
 - `junocashd` on EC2 with EBS (stateful).
 - `juno-scan` as a separate service (DB-backed; RocksDB local volume or managed DB).
-- `juno-pay-server` behind an ALB/NLB; secrets in Secrets Manager; logs to CloudWatch.
+- `juno-pay-server` behind an ALB/NLB; secrets in SSM/Secrets Manager; logs to CloudWatch.
 - Optional brokers:
   - Kafka/MSK for high-volume event fanout
   - RabbitMQ (Amazon MQ) or NATS (self-hosted) for queue/stream integration
