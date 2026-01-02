@@ -79,6 +79,17 @@ data "aws_iam_policy_document" "host_inline" {
     ]
   }
 
+  dynamic "statement" {
+    for_each = var.pay_store_dsn_ssm_param != "" ? [1] : []
+    content {
+      sid     = "ReadPayStoreDSN"
+      actions = ["ssm:GetParameter", "ssm:GetParameters"]
+      resources = [
+        "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${var.pay_store_dsn_ssm_param}",
+      ]
+    }
+  }
+
   statement {
     sid       = "DecryptSSMDefaultKey"
     actions   = ["kms:Decrypt"]
@@ -120,6 +131,9 @@ locals {
     juno_chain          = var.juno_chain
     juno_scan_ua_hrp    = var.juno_scan_ua_hrp
     juno_scan_confirms  = var.juno_scan_confirmations
+    pay_store_driver    = var.pay_store_driver
+    pay_store_db        = var.pay_store_db
+    pay_store_prefix    = var.pay_store_prefix
     enable_rds_postgres = var.enable_rds_postgres
     rds_endpoint        = var.enable_rds_postgres ? aws_db_instance.junoscan[0].address : ""
     rds_port            = var.enable_rds_postgres ? aws_db_instance.junoscan[0].port : 0
@@ -149,6 +163,7 @@ resource "aws_instance" "host" {
     pay_server_port          = var.pay_server_port
     admin_password_ssm_param = var.admin_password_ssm_param
     token_key_ssm_param      = var.token_key_ssm_param
+    pay_store_dsn_ssm_param  = var.pay_store_dsn_ssm_param
     rds_secret_arn           = var.enable_rds_postgres ? aws_db_instance.junoscan[0].master_user_secret[0].secret_arn : ""
     docker_compose_yml       = local.compose_yml
   })

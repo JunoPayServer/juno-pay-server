@@ -68,6 +68,45 @@ variable "token_key_ssm_param" {
   default     = "/juno-pay/token_key_hex"
 }
 
+variable "pay_store_driver" {
+  type        = string
+  description = "juno-pay-server store driver: sqlite|postgres|mysql|mongo."
+  default     = "sqlite"
+
+  validation {
+    condition     = contains(["sqlite", "postgres", "mysql", "mongo"], var.pay_store_driver)
+    error_message = "pay_store_driver must be one of: sqlite|postgres|mysql|mongo."
+  }
+}
+
+variable "pay_store_dsn_ssm_param" {
+  type        = string
+  description = "Optional SSM parameter name containing JUNO_PAY_STORE_DSN (required for non-sqlite drivers)."
+  default     = ""
+
+  validation {
+    condition     = var.pay_store_driver == "sqlite" || var.pay_store_dsn_ssm_param != ""
+    error_message = "pay_store_dsn_ssm_param is required when pay_store_driver is not sqlite."
+  }
+}
+
+variable "pay_store_db" {
+  type        = string
+  description = "MongoDB database name for pay_store_driver=mongo."
+  default     = ""
+
+  validation {
+    condition     = var.pay_store_driver != "mongo" || var.pay_store_db != ""
+    error_message = "pay_store_db is required when pay_store_driver=mongo."
+  }
+}
+
+variable "pay_store_prefix" {
+  type        = string
+  description = "Optional table/collection prefix for juno-pay-server store (namespaces tables when sharing a DB)."
+  default     = ""
+}
+
 variable "image_juno_pay_server" {
   type        = string
   description = "Docker image URI for juno-pay-server (recommended: ECR)."

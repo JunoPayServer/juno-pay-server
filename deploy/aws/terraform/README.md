@@ -20,6 +20,7 @@ This stack expects the following SSM parameters to exist (SecureString recommend
 
 - `admin_password_ssm_param` (default: `/juno-pay/admin_password`)
 - `token_key_ssm_param` (default: `/juno-pay/token_key_hex`)
+- Optional: `pay_store_dsn_ssm_param` (connection string for `juno-pay-server` when using `postgres|mysql|mongo`)
 
 Create them using the helper script:
 
@@ -27,7 +28,8 @@ Create them using the helper script:
 ../scripts/put-ssm-params.sh \
   --region us-east-1 \
   --admin-password-param /juno-pay/admin_password \
-  --token-key-param /juno-pay/token_key_hex
+  --token-key-param /juno-pay/token_key_hex \
+  --pay-store-dsn-param /juno-pay/pay_store_dsn
 ```
 
 ## Usage
@@ -48,6 +50,19 @@ Set:
 - `rds_subnet_ids=[...]` (subnets that can reach the EC2 host; typically private subnets)
 
 The EC2 host fetches the generated RDS master password from Secrets Manager at boot time and injects it into the Docker Compose DSN.
+
+## Optional: External DB for `juno-pay-server`
+
+By default, the reference stack runs `juno-pay-server` with embedded SQLite on the instance volume.
+
+To use an external DB (recommended for larger deployments), set:
+
+- `pay_store_driver=postgres|mysql|mongo`
+- `pay_store_dsn_ssm_param=/path/to/ssm/param` (contains the DSN/URI)
+- If `pay_store_driver=mongo`: `pay_store_db=...`
+- Optional: `pay_store_prefix=...` to namespace tables/collections when sharing a DB.
+
+This stack does not create the external DB for you; you can point it at an existing RDS/DocumentDB/self-hosted DB reachable from the EC2 instance.
 
 ## Optional: MSK (Kafka)
 

@@ -68,6 +68,16 @@ services:
       JUNO_PAY_ADMIN_PASSWORD: __ADMIN_PASSWORD__
       JUNO_PAY_TOKEN_KEY_HEX: __TOKEN_KEY_HEX__
       JUNO_PAY_DATA_DIR: /data
+      JUNO_PAY_STORE_DRIVER: ${pay_store_driver}
+%{ if pay_store_driver != "sqlite" ~}
+      JUNO_PAY_STORE_DSN: __PAY_STORE_DSN__
+%{ endif ~}
+%{ if pay_store_driver == "mongo" ~}
+      JUNO_PAY_STORE_DB: ${pay_store_db}
+%{ endif ~}
+%{ if pay_store_prefix != "" ~}
+      JUNO_PAY_STORE_PREFIX: ${pay_store_prefix}
+%{ endif ~}
       JUNO_SCAN_URL: http://juno-scan:8080
       JUNO_CASHD_RPC_URL: http://junocashd:8232
       JUNO_CASHD_RPC_USER: rpcuser
