@@ -18,7 +18,9 @@ import (
 	"github.com/Abdullah1738/juno-pay-server/internal/keys/ffi"
 	"github.com/Abdullah1738/juno-pay-server/internal/outbox"
 	"github.com/Abdullah1738/juno-pay-server/internal/scanclient"
-	"github.com/Abdullah1738/juno-pay-server/internal/store/sqlite"
+	"github.com/Abdullah1738/juno-pay-server/internal/store"
+	mongostore "github.com/Abdullah1738/juno-pay-server/internal/store/mongo"
+	"github.com/Abdullah1738/juno-pay-server/internal/store/sqlstore"
 	"github.com/Abdullah1738/juno-sdk-go/junocashd"
 )
 
@@ -39,16 +41,99 @@ func main() {
 		log.Fatalf("invalid JUNO_PAY_TOKEN_KEY_HEX (expected 32-byte hex)")
 	}
 
-	st, err := sqlite.Open(dataDir, tokenKey)
-	if err != nil {
-		log.Fatalf("open store: %v", err)
+	storeDriver := strings.ToLower(strings.TrimSpace(getenv("JUNO_PAY_STORE_DRIVER", "sqlite")))
+	storePrefix := strings.TrimSpace(getenv("JUNO_PAY_STORE_PREFIX", ""))
+	storeDSN := strings.TrimSpace(getenv("JUNO_PAY_STORE_DSN", ""))
+	storeDB := strings.TrimSpace(getenv("JUNO_PAY_STORE_DB", ""))
+
+	var st store.Store
+	var stInit func(context.Context) error
+	var stClose func() error
+
+	openCtx, openCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer openCancel()
+
+	switch storeDriver {
+	case "sqlite":
+		opts := []sqlstore.Option{}
+		if storePrefix != "" {
+			opts = append(opts, sqlstore.WithTablePrefix(storePrefix))
+		}
+		sqlSt, err := sqlstore.OpenSQLite(dataDir, tokenKey, opts...)
+		if err != nil {
+			log.Fatalf("open sqlite store: %v", err)
+		}
+		st = sqlSt
+		stInit = sqlSt.Init
+		stClose = sqlSt.Close
+	case "postgres":
+		if storeDSN == "" {
+			log.Fatalf("missing env: JUNO_PAY_STORE_DSN")
+		}
+		opts := []sqlstore.Option{}
+		if storePrefix != "" {
+			opts = append(opts, sqlstore.WithTablePrefix(storePrefix))
+		}
+		sqlSt, err := sqlstore.OpenPostgres(storeDSN, tokenKey, opts...)
+		if err != nil {
+			log.Fatalf("open postgres store: %v", err)
+		}
+		st = sqlSt
+		stInit = sqlSt.Init
+		stClose = sqlSt.Close
+	case "mysql":
+		if storeDSN == "" {
+			log.Fatalf("missing env: JUNO_PAY_STORE_DSN")
+		}
+		opts := []sqlstore.Option{}
+		if storePrefix != "" {
+			opts = append(opts, sqlstore.WithTablePrefix(storePrefix))
+		}
+		sqlSt, err := sqlstore.OpenMySQL(storeDSN, tokenKey, opts...)
+		if err != nil {
+			log.Fatalf("open mysql store: %v", err)
+		}
+		st = sqlSt
+		stInit = sqlSt.Init
+		stClose = sqlSt.Close
+	case "mongo", "mongodb":
+		if storeDSN == "" {
+			log.Fatalf("missing env: JUNO_PAY_STORE_DSN")
+		}
+		if storeDB == "" {
+			log.Fatalf("missing env: JUNO_PAY_STORE_DB")
+		}
+		opts := []mongostore.Option{}
+		if storePrefix != "" {
+			opts = append(opts, mongostore.WithCollectionPrefix(storePrefix))
+		}
+		mgSt, err := mongostore.Open(openCtx, mongostore.OpenConfig{
+			URI:      storeDSN,
+			Database: storeDB,
+			TokenKey: tokenKey,
+			Options:  opts,
+		})
+		if err != nil {
+			log.Fatalf("open mongo store: %v", err)
+		}
+		st = mgSt
+		stInit = mgSt.Init
+		stClose = mgSt.Close
+	default:
+		log.Fatalf("invalid JUNO_PAY_STORE_DRIVER: %q", storeDriver)
 	}
-	defer func() { _ = st.Close() }()
+	defer func() {
+		if stClose != nil {
+			_ = stClose()
+		}
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := st.Init(ctx); err != nil {
-		log.Fatalf("init store: %v", err)
+	if stInit != nil {
+		if err := stInit(ctx); err != nil {
+			log.Fatalf("init store: %v", err)
+		}
 	}
 
 	rpcURL := getenv("JUNO_CASHD_RPC_URL", "http://127.0.0.1:8232")

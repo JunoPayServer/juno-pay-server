@@ -31,13 +31,12 @@ type Store struct {
 
 var _ store.Store = (*Store)(nil)
 
-func (s *Store) Close(ctx context.Context) error {
+func (s *Store) Close() error {
 	if s == nil || s.client == nil {
 		return nil
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	return s.client.Disconnect(ctx)
 }
 
