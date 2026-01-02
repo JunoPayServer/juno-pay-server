@@ -86,7 +86,7 @@ func (mysqlDialect) schemaStmts() []string {
 
 		`CREATE TABLE IF NOT EXISTS scan_cursors (
 			wallet_id VARCHAR(64) PRIMARY KEY,
-			cursor BIGINT NOT NULL,
+			cursor_id BIGINT NOT NULL,
 			last_event_at BIGINT NULL
 		) ENGINE=InnoDB`,
 
@@ -205,6 +205,9 @@ func (mysqlDialect) schemaStmts() []string {
 }
 
 func (mysqlDialect) isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
 	var myErr *mysql.MySQLError
 	if errors.As(err, &myErr) {
 		return myErr.Number == 1062
@@ -214,6 +217,9 @@ func (mysqlDialect) isUniqueViolation(err error) bool {
 }
 
 func (mysqlDialect) isAlreadyExists(err error) bool {
+	if err == nil {
+		return false
+	}
 	var myErr *mysql.MySQLError
 	if errors.As(err, &myErr) {
 		// 1050: Table already exists
@@ -224,4 +230,3 @@ func (mysqlDialect) isAlreadyExists(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "already exists") || strings.Contains(msg, "duplicate")
 }
-

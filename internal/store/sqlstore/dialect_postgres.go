@@ -82,7 +82,7 @@ func (postgresDialect) schemaStmts() []string {
 		)`,
 		`CREATE TABLE IF NOT EXISTS scan_cursors (
 			wallet_id TEXT PRIMARY KEY,
-			cursor BIGINT NOT NULL,
+			cursor_id BIGINT NOT NULL,
 			last_event_at BIGINT
 		)`,
 		`CREATE TABLE IF NOT EXISTS deposits (
@@ -191,6 +191,9 @@ func (postgresDialect) schemaStmts() []string {
 }
 
 func (postgresDialect) isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		return pgErr.Code == "23505"
@@ -200,6 +203,9 @@ func (postgresDialect) isUniqueViolation(err error) bool {
 }
 
 func (postgresDialect) isAlreadyExists(err error) bool {
+	if err == nil {
+		return false
+	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		return pgErr.Code == "42P07" || pgErr.Code == "42710"

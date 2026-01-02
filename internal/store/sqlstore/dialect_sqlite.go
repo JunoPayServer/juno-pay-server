@@ -77,7 +77,7 @@ func (sqliteDialect) schemaStmts() []string {
 		)`,
 		`CREATE TABLE IF NOT EXISTS scan_cursors (
 			wallet_id TEXT PRIMARY KEY,
-			cursor INTEGER NOT NULL,
+			cursor_id INTEGER NOT NULL,
 			last_event_at INTEGER
 		)`,
 		`CREATE TABLE IF NOT EXISTS deposits (

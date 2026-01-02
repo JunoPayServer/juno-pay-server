@@ -7,8 +7,8 @@ deposit detection is done via `juno-scan` note scanning (trial-decrypt with UFVK
 
 ## Components
 
-- `junocashd`: full node (consensus + validated block source).
-- `juno-scan`: watch-only scanner/indexer (UFVK → deposit events).
+- [`junocashd`](https://github.com/juno-cash/junocash/releases): full node (consensus + validated block source).
+- [`juno-scan`](https://github.com/Abdullah1738/juno-scan): watch-only scanner/indexer (UFVK → deposit events).
 - `juno-pay-server` (this repo): merchant config + invoices + durable event delivery (webhook/brokers).
 - Admin dashboard: served by `juno-pay-server` at `GET /admin/` (static export).
 - Demo checkout UI: `demo-app/` (localStorage-only; can be hosted separately).

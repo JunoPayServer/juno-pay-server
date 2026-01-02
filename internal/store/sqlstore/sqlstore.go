@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Abdullah1738/juno-pay-server/internal/domain"
@@ -619,7 +620,9 @@ func (s *Store) CreateInvoice(ctx context.Context, req store.InvoiceCreate) (dom
 	}
 
 	// Idempotent replay: fetch existing invoice by (merchant_id, external_order_id_hash).
-	existing, ok, err := s.findInvoiceTx(ctx, tx, req.MerchantID, req.ExternalOrderID, extOrderHash)
+	// Note: on Postgres, once a statement errors the transaction is aborted; do not reuse `tx`.
+	_ = tx.Rollback()
+	existing, ok, err := s.FindInvoiceByExternalOrderID(ctx, req.MerchantID, req.ExternalOrderID)
 	if err != nil {
 		return domain.Invoice{}, false, err
 	}
@@ -883,7 +886,7 @@ func (s *Store) ScanCursor(ctx context.Context, walletID string) (cursor int64, 
 	if walletID == "" {
 		return 0, domain.NewError(domain.ErrInvalidArgument, "wallet_id is required")
 	}
-	err = s.db.QueryRowContext(ctx, s.q(`SELECT cursor FROM scan_cursors WHERE wallet_id = ?`), walletID).Scan(&cursor)
+	err = s.db.QueryRowContext(ctx, s.q(`SELECT cursor_id FROM scan_cursors WHERE wallet_id = ?`), walletID).Scan(&cursor)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
@@ -899,7 +902,7 @@ func (s *Store) ScannerStatus(ctx context.Context) (lastCursor int64, lastEventA
 		maxEvent  sql.NullInt64
 	)
 	if err := s.db.QueryRowContext(ctx, s.q(`
-		SELECT COALESCE(MAX(cursor), 0), MAX(last_event_at)
+		SELECT COALESCE(MAX(cursor_id), 0), MAX(last_event_at)
 		FROM scan_cursors
 	`)).Scan(&maxCursor, &maxEvent); err != nil {
 		return 0, nil, err
@@ -940,7 +943,7 @@ func (s *Store) ApplyScanEvent(ctx context.Context, ev store.ScanEvent) error {
 	defer func() { _ = tx.Rollback() }()
 
 	var cur int64
-	err = tx.QueryRowContext(ctx, s.q(`SELECT cursor FROM scan_cursors WHERE wallet_id = ?`), ev.WalletID).Scan(&cur)
+	err = tx.QueryRowContext(ctx, s.q(`SELECT cursor_id FROM scan_cursors WHERE wallet_id = ?`), ev.WalletID).Scan(&cur)
 	if errors.Is(err, sql.ErrNoRows) {
 		cur = 0
 		err = nil
@@ -972,26 +975,26 @@ func (s *Store) ApplyScanEvent(ctx context.Context, ev store.ScanEvent) error {
 
 	res, err := tx.ExecContext(ctx, s.q(`
 		UPDATE scan_cursors
-		SET cursor = ?, last_event_at = ?
-		WHERE wallet_id = ? AND cursor < ?
+		SET cursor_id = ?, last_event_at = ?
+		WHERE wallet_id = ? AND cursor_id < ?
 	`), ev.Cursor, lastEventAtUnix, ev.WalletID, ev.Cursor)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		_, err := tx.ExecContext(ctx, s.q(`
-			INSERT INTO scan_cursors (wallet_id, cursor, last_event_at)
+		inserted, err := s.execTxIgnoreUnique(ctx, tx, s.q(`
+			INSERT INTO scan_cursors (wallet_id, cursor_id, last_event_at)
 			VALUES (?, ?, ?)
 		`), ev.WalletID, ev.Cursor, lastEventAtUnix)
-		if err != nil && !s.dialect.isUniqueViolation(err) {
+		if err != nil {
 			return err
 		}
-		if err != nil {
+		if !inserted {
 			// Race: retry update.
 			if _, err := tx.ExecContext(ctx, s.q(`
 				UPDATE scan_cursors
-				SET cursor = ?, last_event_at = ?
-				WHERE wallet_id = ? AND cursor < ?
+				SET cursor_id = ?, last_event_at = ?
+				WHERE wallet_id = ? AND cursor_id < ?
 			`), ev.Cursor, lastEventAtUnix, ev.WalletID, ev.Cursor); err != nil {
 				return err
 			}
@@ -1991,34 +1994,6 @@ func (s *Store) UpdateEventDelivery(ctx context.Context, deliveryID string, stat
 	return nil
 }
 
-func (s *Store) findInvoiceTx(ctx context.Context, tx *sql.Tx, merchantID, externalOrderID string, externalOrderIDHash []byte) (domain.Invoice, bool, error) {
-	rows, err := tx.QueryContext(ctx, s.q(`
-		SELECT invoice_id, merchant_id, external_order_id, wallet_id, address_index, address, created_after_height, created_after_hash,
-		       amount_zat, required_confirmations,
-		       policy_late_payment, policy_partial_payment, policy_overpayment,
-		       received_pending_zat, received_confirmed_zat,
-		       status, expires_at, created_at, updated_at
-		FROM invoices
-		WHERE merchant_id = ? AND external_order_id_hash = ?
-		LIMIT 1
-	`), merchantID, externalOrderIDHash)
-	if err != nil {
-		return domain.Invoice{}, false, err
-	}
-	defer rows.Close()
-	if !rows.Next() {
-		return domain.Invoice{}, false, nil
-	}
-	inv, err := scanInvoiceFull(rows)
-	if err != nil {
-		return domain.Invoice{}, false, err
-	}
-	if inv.ExternalOrderID != externalOrderID {
-		return domain.Invoice{}, false, nil
-	}
-	return inv, true, nil
-}
-
 func scanInvoiceFull(rows *sql.Rows) (domain.Invoice, error) {
 	var (
 		invoiceID          string
@@ -2119,7 +2094,7 @@ func (s *Store) insertInvoiceEventTx(ctx context.Context, tx *sql.Tx, invoiceID 
 		refundIDAny = strings.TrimSpace(*refundID)
 	}
 
-	_, err := tx.ExecContext(ctx, s.q(`
+	inserted, err := s.execTxIgnoreUnique(ctx, tx, s.q(`
 		INSERT INTO invoice_events (
 			invoice_id, type, occurred_at,
 			deposit_wallet_id, deposit_txid, deposit_action_index, deposit_amount_zat, deposit_height,
@@ -2133,10 +2108,10 @@ func (s *Store) insertInvoiceEventTx(ctx context.Context, tx *sql.Tx, invoiceID 
 		nowUnix,
 	)
 	if err != nil {
-		if s.dialect.isUniqueViolation(err) {
-			return nil
-		}
 		return err
+	}
+	if !inserted {
+		return nil
 	}
 
 	// Note: for events where both deposit and refund are NULL, we pre-check for duplicates above,
@@ -2423,7 +2398,7 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		_, err := tx.ExecContext(ctx, s.q(`
+		inserted, err := s.execTxIgnoreUnique(ctx, tx, s.q(`
 			INSERT INTO deposits (
 				wallet_id, txid, action_index,
 				recipient_address, recipient_address_hash, amount_zat, height,
@@ -2431,10 +2406,10 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 				detected_at, updated_at
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`), walletID, txid, actionIndex, addr, addrHash, amountZat, height, status, confirmedHeightAny, invoiceIDAny, detectedAtUnix, updatedAtUnix)
-		if err != nil && !s.dialect.isUniqueViolation(err) {
+		if err != nil {
 			return err
 		}
-		if err != nil {
+		if !inserted {
 			// Race: retry update.
 			if _, err := tx.ExecContext(ctx, s.q(`
 				UPDATE deposits
@@ -2494,7 +2469,7 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 			walletID, txid, actionIndex, addr, amountZat, height,
 		)
 
-		_, err = tx.ExecContext(ctx, s.q(`
+		_, err = s.execTxIgnoreUnique(ctx, tx, s.q(`
 			INSERT INTO review_cases (
 				review_id, merchant_id, invoice_id,
 				reason, status, notes,
@@ -2506,9 +2481,6 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 			walletID, txid, actionIndex,
 			updatedAtUnix, updatedAtUnix,
 		)
-		if s.dialect.isUniqueViolation(err) {
-			return nil
-		}
 		return err
 	}
 
@@ -2604,7 +2576,7 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 			if err != nil {
 				return err
 			}
-			_, err = tx.ExecContext(ctx, s.q(`
+			_, err = s.execTxIgnoreUnique(ctx, tx, s.q(`
 				INSERT INTO review_cases (
 					review_id, merchant_id, invoice_id,
 					reason, status, notes,
@@ -2614,9 +2586,6 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 				string(domain.ReviewPartialPayment), string(domain.ReviewOpen), "partial payment requires review",
 				updatedAtUnix, updatedAtUnix,
 			)
-			if s.dialect.isUniqueViolation(err) {
-				return nil
-			}
 			if err != nil {
 				return err
 			}
@@ -2625,7 +2594,7 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 			if err != nil {
 				return err
 			}
-			_, err = tx.ExecContext(ctx, s.q(`
+			_, err = s.execTxIgnoreUnique(ctx, tx, s.q(`
 				INSERT INTO review_cases (
 					review_id, merchant_id, invoice_id,
 					reason, status, notes,
@@ -2635,9 +2604,6 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 				string(domain.ReviewOverpayment), string(domain.ReviewOpen), "overpayment requires review",
 				updatedAtUnix, updatedAtUnix,
 			)
-			if s.dialect.isUniqueViolation(err) {
-				return nil
-			}
 			if err != nil {
 				return err
 			}
@@ -2647,7 +2613,7 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 			if err != nil {
 				return err
 			}
-			_, err = tx.ExecContext(ctx, s.q(`
+			_, err = s.execTxIgnoreUnique(ctx, tx, s.q(`
 				INSERT INTO review_cases (
 					review_id, merchant_id, invoice_id,
 					reason, status, notes,
@@ -2657,9 +2623,6 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 				string(domain.ReviewLatePayment), string(domain.ReviewOpen), "late payment requires review",
 				updatedAtUnix, updatedAtUnix,
 			)
-			if s.dialect.isUniqueViolation(err) {
-				return nil
-			}
 			if err != nil {
 				return err
 			}
@@ -2719,6 +2682,38 @@ func newID(prefix string) (string, error) {
 		return "", err
 	}
 	return prefix + "_" + hex.EncodeToString(raw[:]), nil
+}
+
+var savepointSeq uint64
+
+func (s *Store) execTxIgnoreUnique(ctx context.Context, tx *sql.Tx, query string, args ...any) (inserted bool, err error) {
+	if tx == nil {
+		return false, errors.New("sqlite: nil tx")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	sp := fmt.Sprintf("sp_%d", atomic.AddUint64(&savepointSeq, 1))
+	if _, err := tx.ExecContext(ctx, "SAVEPOINT "+sp); err != nil {
+		return false, err
+	}
+
+	_, err = tx.ExecContext(ctx, query, args...)
+	if err == nil {
+		_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT "+sp)
+		return true, nil
+	}
+
+	if s != nil && s.dialect != nil && s.dialect.isUniqueViolation(err) {
+		if _, rbErr := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT "+sp); rbErr != nil {
+			return false, rbErr
+		}
+		_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT "+sp)
+		return false, nil
+	}
+
+	return false, err
 }
 
 func isUniqueViolation(err error) bool {

@@ -118,15 +118,29 @@ func (s *Store) Init(ctx context.Context) error {
 	}
 	if err := ensure(reviewCases,
 		mongo.IndexModel{Keys: bson.D{{Key: "merchant_id", Value: 1}, {Key: "status", Value: 1}, {Key: "created_at", Value: 1}}},
-		mongo.IndexModel{Keys: bson.D{{Key: "merchant_id", Value: 1}, {Key: "invoice_id", Value: 1}, {Key: "reason", Value: 1}, {Key: "status", Value: 1}}, Options: options.Index().SetUnique(true)},
-		mongo.IndexModel{Keys: bson.D{{Key: "deposit_wallet_id", Value: 1}, {Key: "deposit_txid", Value: 1}, {Key: "deposit_action_index", Value: 1}, {Key: "reason", Value: 1}}, Options: options.Index().SetUnique(true)},
+		mongo.IndexModel{
+			Keys: bson.D{{Key: "merchant_id", Value: 1}, {Key: "invoice_id", Value: 1}, {Key: "reason", Value: 1}, {Key: "status", Value: 1}},
+			Options: options.Index().
+				SetUnique(true).
+				SetPartialFilterExpression(bson.M{"invoice_id": bson.M{"$type": "string"}}),
+		},
+		mongo.IndexModel{
+			Keys: bson.D{{Key: "deposit_wallet_id", Value: 1}, {Key: "deposit_txid", Value: 1}, {Key: "deposit_action_index", Value: 1}, {Key: "reason", Value: 1}},
+			Options: options.Index().
+				SetUnique(true).
+				SetPartialFilterExpression(bson.M{"deposit_txid": bson.M{"$type": "string"}}),
+		},
 	); err != nil {
 		return err
 	}
 	if err := ensure(invoiceEvents,
 		mongo.IndexModel{Keys: bson.D{{Key: "invoice_id", Value: 1}, {Key: "_id", Value: 1}}},
-		mongo.IndexModel{Keys: bson.D{{Key: "invoice_id", Value: 1}, {Key: "type", Value: 1}, {Key: "deposit_wallet_id", Value: 1}, {Key: "deposit_txid", Value: 1}, {Key: "deposit_action_index", Value: 1}}, Options: options.Index().SetUnique(true)},
-		mongo.IndexModel{Keys: bson.D{{Key: "invoice_id", Value: 1}, {Key: "type", Value: 1}, {Key: "refund_id", Value: 1}}, Options: options.Index().SetUnique(true)},
+		mongo.IndexModel{
+			Keys: bson.D{{Key: "dedupe_key", Value: 1}},
+			Options: options.Index().
+				SetUnique(true).
+				SetPartialFilterExpression(bson.M{"dedupe_key": bson.M{"$type": "string"}}),
+		},
 	); err != nil {
 		return err
 	}
@@ -253,11 +267,11 @@ func (s *Store) CreateMerchant(ctx context.Context, name string, settings domain
 		"name":   name,
 		"status": string(domain.MerchantActive),
 		"settings": bson.M{
-			"invoice_ttl_seconds":     settings.InvoiceTTLSeconds,
-			"required_confirmations":  settings.RequiredConfirmations,
-			"late_payment_policy":     string(settings.Policies.LatePayment),
-			"partial_payment_policy":  string(settings.Policies.PartialPayment),
-			"overpayment_policy":      string(settings.Policies.Overpayment),
+			"invoice_ttl_seconds":    settings.InvoiceTTLSeconds,
+			"required_confirmations": settings.RequiredConfirmations,
+			"late_payment_policy":    string(settings.Policies.LatePayment),
+			"partial_payment_policy": string(settings.Policies.PartialPayment),
+			"overpayment_policy":     string(settings.Policies.Overpayment),
 		},
 		"created_at": nowUnix,
 		"updated_at": nowUnix,
@@ -287,15 +301,15 @@ func (s *Store) GetMerchant(ctx context.Context, merchantID string) (domain.Merc
 	}
 
 	var doc struct {
-		ID     string `bson:"_id"`
-		Name   string `bson:"name"`
-		Status string `bson:"status"`
+		ID       string `bson:"_id"`
+		Name     string `bson:"name"`
+		Status   string `bson:"status"`
 		Settings struct {
-			InvoiceTTLSeconds    int64  `bson:"invoice_ttl_seconds"`
-			RequiredConfirmations int32 `bson:"required_confirmations"`
-			LatePaymentPolicy    string `bson:"late_payment_policy"`
-			PartialPaymentPolicy string `bson:"partial_payment_policy"`
-			OverpaymentPolicy    string `bson:"overpayment_policy"`
+			InvoiceTTLSeconds     int64  `bson:"invoice_ttl_seconds"`
+			RequiredConfirmations int32  `bson:"required_confirmations"`
+			LatePaymentPolicy     string `bson:"late_payment_policy"`
+			PartialPaymentPolicy  string `bson:"partial_payment_policy"`
+			OverpaymentPolicy     string `bson:"overpayment_policy"`
 		} `bson:"settings"`
 		CreatedAt int64 `bson:"created_at"`
 		UpdatedAt int64 `bson:"updated_at"`
@@ -342,15 +356,15 @@ func (s *Store) ListMerchants(ctx context.Context) ([]domain.Merchant, error) {
 	var out []domain.Merchant
 	for cur.Next(ctx) {
 		var doc struct {
-			ID     string `bson:"_id"`
-			Name   string `bson:"name"`
-			Status string `bson:"status"`
+			ID       string `bson:"_id"`
+			Name     string `bson:"name"`
+			Status   string `bson:"status"`
 			Settings struct {
-				InvoiceTTLSeconds    int64  `bson:"invoice_ttl_seconds"`
-				RequiredConfirmations int32 `bson:"required_confirmations"`
-				LatePaymentPolicy    string `bson:"late_payment_policy"`
-				PartialPaymentPolicy string `bson:"partial_payment_policy"`
-				OverpaymentPolicy    string `bson:"overpayment_policy"`
+				InvoiceTTLSeconds     int64  `bson:"invoice_ttl_seconds"`
+				RequiredConfirmations int32  `bson:"required_confirmations"`
+				LatePaymentPolicy     string `bson:"late_payment_policy"`
+				PartialPaymentPolicy  string `bson:"partial_payment_policy"`
+				OverpaymentPolicy     string `bson:"overpayment_policy"`
 			} `bson:"settings"`
 			CreatedAt int64 `bson:"created_at"`
 			UpdatedAt int64 `bson:"updated_at"`
@@ -398,11 +412,11 @@ func (s *Store) UpdateMerchantSettings(ctx context.Context, merchantID string, s
 	update := bson.M{
 		"$set": bson.M{
 			"settings": bson.M{
-				"invoice_ttl_seconds":     settings.InvoiceTTLSeconds,
-				"required_confirmations":  settings.RequiredConfirmations,
-				"late_payment_policy":     string(settings.Policies.LatePayment),
-				"partial_payment_policy":  string(settings.Policies.PartialPayment),
-				"overpayment_policy":      string(settings.Policies.Overpayment),
+				"invoice_ttl_seconds":    settings.InvoiceTTLSeconds,
+				"required_confirmations": settings.RequiredConfirmations,
+				"late_payment_policy":    string(settings.Policies.LatePayment),
+				"partial_payment_policy": string(settings.Policies.PartialPayment),
+				"overpayment_policy":     string(settings.Policies.Overpayment),
 			},
 			"updated_at": nowUnix,
 		},
@@ -462,14 +476,14 @@ func (s *Store) SetMerchantWallet(ctx context.Context, merchantID string, w stor
 	nowUnix := now.Unix()
 
 	doc := bson.M{
-		"_id":               merchantID,
-		"wallet_id":         w.WalletID,
-		"ufvk":              w.UFVK,
-		"chain":             w.Chain,
-		"ua_hrp":            w.UAHRP,
-		"coin_type":         w.CoinType,
+		"_id":                merchantID,
+		"wallet_id":          w.WalletID,
+		"ufvk":               w.UFVK,
+		"chain":              w.Chain,
+		"ua_hrp":             w.UAHRP,
+		"coin_type":          w.CoinType,
 		"next_address_index": int64(0),
-		"created_at":        nowUnix,
+		"created_at":         nowUnix,
 	}
 
 	if _, err := s.c("merchant_wallets").InsertOne(ctx, doc); err != nil {
@@ -494,13 +508,13 @@ func (s *Store) GetMerchantWallet(ctx context.Context, merchantID string) (store
 	}
 
 	var doc struct {
-		ID              string `bson:"_id"`
-		WalletID        string `bson:"wallet_id"`
-		UFVK            string `bson:"ufvk"`
-		Chain           string `bson:"chain"`
-		UAHRP           string `bson:"ua_hrp"`
-		CoinType        int32  `bson:"coin_type"`
-		CreatedAtUnix   int64  `bson:"created_at"`
+		ID            string `bson:"_id"`
+		WalletID      string `bson:"wallet_id"`
+		UFVK          string `bson:"ufvk"`
+		Chain         string `bson:"chain"`
+		UAHRP         string `bson:"ua_hrp"`
+		CoinType      int32  `bson:"coin_type"`
+		CreatedAtUnix int64  `bson:"created_at"`
 	}
 	err := s.c("merchant_wallets").FindOne(ctx, bson.M{"_id": merchantID}).Decode(&doc)
 	if errors.Is(err, mongo.ErrNoDocuments) {
@@ -620,11 +634,11 @@ func (s *Store) CreateMerchantAPIKey(ctx context.Context, merchantID, label stri
 
 	nowUnix := time.Now().UTC().Unix()
 	doc := bson.M{
-		"_id":        keyID,
+		"_id":         keyID,
 		"merchant_id": merchantID,
-		"label":      label,
-		"token_hash": hashHex,
-		"created_at": nowUnix,
+		"label":       label,
+		"token_hash":  hashHex,
+		"created_at":  nowUnix,
 	}
 	if _, err := s.c("api_keys").InsertOne(ctx, doc); err != nil {
 		return "", "", err
@@ -650,7 +664,9 @@ func (s *Store) RevokeMerchantAPIKey(ctx context.Context, keyID string) error {
 	}
 	if res.MatchedCount == 0 {
 		// Either already revoked or not found; mimic sqlstore behavior: ErrNotFound only if missing.
-		var exists struct{ ID string `bson:"_id"` }
+		var exists struct {
+			ID string `bson:"_id"`
+		}
 		err := s.c("api_keys").FindOne(ctx, bson.M{"_id": keyID}).Decode(&exists)
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return store.ErrNotFound
@@ -745,18 +761,18 @@ func (s *Store) CreateInvoice(ctx context.Context, req store.InvoiceCreate) (dom
 		}
 
 		invDoc := bson.M{
-			"_id":                  id,
-			"seq":                  seq,
-			"merchant_id":          req.MerchantID,
-			"external_order_id":    req.ExternalOrderID,
+			"_id":                    id,
+			"seq":                    seq,
+			"merchant_id":            req.MerchantID,
+			"external_order_id":      req.ExternalOrderID,
 			"external_order_id_hash": extHash,
-			"wallet_id":            req.WalletID,
-			"address_index":        int64(req.AddressIndex),
-			"address":              req.Address,
-			"address_hash":         addrHash,
-			"created_after_height": req.CreatedAfterHeight,
-			"created_after_hash":   strings.TrimSpace(req.CreatedAfterHash),
-			"amount_zat":           req.AmountZat,
+			"wallet_id":              req.WalletID,
+			"address_index":          int64(req.AddressIndex),
+			"address":                req.Address,
+			"address_hash":           addrHash,
+			"created_after_height":   req.CreatedAfterHeight,
+			"created_after_hash":     strings.TrimSpace(req.CreatedAfterHash),
+			"amount_zat":             req.AmountZat,
 			"required_confirmations": req.RequiredConfirmations,
 			"policies": bson.M{
 				"late_payment":    string(req.Policies.LatePayment),
@@ -841,18 +857,18 @@ func (s *Store) findInvoiceByExternal(ctx context.Context, merchantID, externalO
 }
 
 type invoiceDoc struct {
-	ID                string `bson:"_id"`
-	Seq               int64  `bson:"seq"`
-	MerchantID        string `bson:"merchant_id"`
-	ExternalOrderID   string `bson:"external_order_id"`
-	WalletID          string `bson:"wallet_id"`
-	AddressIndex      int64  `bson:"address_index"`
-	Address           string `bson:"address"`
-	CreatedAfterHeight int64 `bson:"created_after_height"`
-	CreatedAfterHash  string `bson:"created_after_hash"`
-	AmountZat         int64  `bson:"amount_zat"`
-	RequiredConfirmations int32 `bson:"required_confirmations"`
-	Policies struct {
+	ID                    string `bson:"_id"`
+	Seq                   int64  `bson:"seq"`
+	MerchantID            string `bson:"merchant_id"`
+	ExternalOrderID       string `bson:"external_order_id"`
+	WalletID              string `bson:"wallet_id"`
+	AddressIndex          int64  `bson:"address_index"`
+	Address               string `bson:"address"`
+	CreatedAfterHeight    int64  `bson:"created_after_height"`
+	CreatedAfterHash      string `bson:"created_after_hash"`
+	AmountZat             int64  `bson:"amount_zat"`
+	RequiredConfirmations int32  `bson:"required_confirmations"`
+	Policies              struct {
 		LatePayment    string `bson:"late_payment"`
 		PartialPayment string `bson:"partial_payment"`
 		Overpayment    string `bson:"overpayment"`
@@ -1297,9 +1313,9 @@ func (s *Store) applyDepositEvent(sessCtx mongo.SessionContext, ev store.ScanEve
 		_, err := s.c("deposits").UpdateOne(
 			sessCtx,
 			bson.M{
-				"wallet_id":     walletID,
-				"txid":          txid,
-				"action_index":  actionIndex,
+				"wallet_id":    walletID,
+				"txid":         txid,
+				"action_index": actionIndex,
 				"$or": []bson.M{
 					{"invoice_id": bson.M{"$exists": false}},
 					{"invoice_id": nil},
@@ -1326,31 +1342,10 @@ func (s *Store) applyDepositEvent(sessCtx mongo.SessionContext, ev store.ScanEve
 			return err
 		}
 
-		reviewID, err := newID("rev")
-		if err != nil {
-			return err
-		}
 		notes := fmt.Sprintf("wallet_id=%s txid=%s action_index=%d recipient_address=%s amount_zat=%d height=%d",
 			walletID, txid, actionIndex, addr, amountZat, height,
 		)
-
-		doc := bson.M{
-			"_id":                 reviewID,
-			"merchant_id":         mw.MerchantID,
-			"invoice_id":          nil,
-			"reason":              string(domain.ReviewUnknownAddress),
-			"status":              string(domain.ReviewOpen),
-			"notes":               notes,
-			"deposit_wallet_id":   walletID,
-			"deposit_txid":        txid,
-			"deposit_action_index": actionIndex,
-			"created_at":          updatedAtUnix,
-			"updated_at":          updatedAtUnix,
-		}
-		if _, err := s.c("review_cases").InsertOne(sessCtx, doc); err != nil {
-			if isDuplicateKey(err) {
-				return nil
-			}
+		if err := s.createReviewCase(sessCtx, mw.MerchantID, nil, domain.ReviewUnknownAddress, notes, walletID, txid, actionIndex); err != nil {
 			return err
 		}
 		return nil
@@ -1498,6 +1493,25 @@ func computeInvoiceStatusSQL(amountZat int64, confirmedZat int64, expired bool, 
 	}
 }
 
+func invoiceEventDedupeKey(invoiceID string, typ domain.InvoiceEventType, dep *domain.DepositRef, refundID *string) string {
+	invoiceID = strings.TrimSpace(invoiceID)
+	if invoiceID == "" {
+		return ""
+	}
+
+	var suffix string
+	switch {
+	case dep != nil:
+		suffix = fmt.Sprintf("dep:%s:%s:%d", strings.TrimSpace(dep.WalletID), strings.TrimSpace(dep.TxID), dep.ActionIndex)
+	case refundID != nil && strings.TrimSpace(*refundID) != "":
+		suffix = "refund:" + strings.TrimSpace(*refundID)
+	default:
+		suffix = "none"
+	}
+
+	return "inv:" + invoiceID + "|type:" + string(typ) + "|" + suffix
+}
+
 func (s *Store) insertInvoiceEvent(ctx mongo.SessionContext, invoiceID string, typ domain.InvoiceEventType, occurredAt time.Time, dep *domain.DepositRef, refundID *string) error {
 	invoiceID = strings.TrimSpace(invoiceID)
 	if invoiceID == "" {
@@ -1510,16 +1524,9 @@ func (s *Store) insertInvoiceEvent(ctx mongo.SessionContext, invoiceID string, t
 		occurredAt = now
 	}
 
-	// Dedupe events with no deposit/refund explicitly.
-	if dep == nil && (refundID == nil || strings.TrimSpace(*refundID) == "") {
-		filter := bson.M{"invoice_id": invoiceID, "type": string(typ), "deposit_txid": bson.M{"$exists": false}, "refund_id": bson.M{"$exists": false}}
-		err := s.c("invoice_events").FindOne(ctx, filter).Err()
-		if err == nil {
-			return nil
-		}
-		if err != nil && !errors.Is(err, mongo.ErrNoDocuments) {
-			return err
-		}
+	dedupeKey := invoiceEventDedupeKey(invoiceID, typ, dep, refundID)
+	if dedupeKey == "" {
+		return nil
 	}
 
 	id, err := s.nextSeq(ctx, ctx, "invoice_event_seq")
@@ -1529,6 +1536,7 @@ func (s *Store) insertInvoiceEvent(ctx mongo.SessionContext, invoiceID string, t
 
 	doc := bson.M{
 		"_id":         id,
+		"dedupe_key":  dedupeKey,
 		"invoice_id":  invoiceID,
 		"type":        string(typ),
 		"occurred_at": occurredAt.Unix(),
@@ -1545,11 +1553,13 @@ func (s *Store) insertInvoiceEvent(ctx mongo.SessionContext, invoiceID string, t
 		doc["refund_id"] = strings.TrimSpace(*refundID)
 	}
 
-	if _, err := s.c("invoice_events").InsertOne(ctx, doc); err != nil {
-		if isDuplicateKey(err) {
-			return nil
-		}
+	update := bson.M{"$setOnInsert": doc}
+	res, err := s.c("invoice_events").UpdateOne(ctx, bson.M{"dedupe_key": dedupeKey}, update, options.Update().SetUpsert(true))
+	if err != nil {
 		return err
+	}
+	if res.UpsertedID == nil {
+		return nil
 	}
 
 	return s.enqueueOutbox(ctx, invoiceID, typ, occurredAt, dep, refundID)
@@ -1628,11 +1638,11 @@ func (s *Store) enqueueOutbox(ctx mongo.SessionContext, invoiceID string, typ do
 	}
 
 	outDoc := bson.M{
-		"_id":          seq,
-		"event_id":     eventID,
-		"merchant_id":  inv.MerchantID,
+		"_id":           seq,
+		"event_id":      eventID,
+		"merchant_id":   inv.MerchantID,
 		"envelope_json": envBytes,
-		"created_at":   time.Now().UTC().Unix(),
+		"created_at":    time.Now().UTC().Unix(),
 	}
 	if _, err := s.c("outbox_events").InsertOne(ctx, outDoc); err != nil {
 		if !isDuplicateKey(err) {
@@ -1687,17 +1697,17 @@ func (s *Store) enqueueOutbox(ctx mongo.SessionContext, invoiceID string, typ do
 
 func (s *Store) getRefund(ctx context.Context, refundID string) (domain.Refund, bool, error) {
 	var doc struct {
-		ID              string `bson:"_id"`
-		MerchantID      string `bson:"merchant_id"`
-		InvoiceID       *string `bson:"invoice_id"`
+		ID               string  `bson:"_id"`
+		MerchantID       string  `bson:"merchant_id"`
+		InvoiceID        *string `bson:"invoice_id"`
 		ExternalRefundID *string `bson:"external_refund_id"`
-		ToAddress       string `bson:"to_address"`
-		AmountZat       int64  `bson:"amount_zat"`
-		Status          string `bson:"status"`
-		SentTxID        *string `bson:"sent_txid"`
-		Notes           string `bson:"notes"`
-		CreatedAtUnix   int64  `bson:"created_at"`
-		UpdatedAtUnix   int64  `bson:"updated_at"`
+		ToAddress        string  `bson:"to_address"`
+		AmountZat        int64   `bson:"amount_zat"`
+		Status           string  `bson:"status"`
+		SentTxID         *string `bson:"sent_txid"`
+		Notes            string  `bson:"notes"`
+		CreatedAtUnix    int64   `bson:"created_at"`
+		UpdatedAtUnix    int64   `bson:"updated_at"`
 	}
 	err := s.c("refunds").FindOne(ctx, bson.M{"_id": refundID}).Decode(&doc)
 	if errors.Is(err, mongo.ErrNoDocuments) {
@@ -1867,18 +1877,18 @@ func (s *Store) ListDeposits(ctx context.Context, f store.DepositFilter) (deposi
 
 	for cur.Next(ctx) {
 		var doc struct {
-			Seq             int64  `bson:"seq"`
-			WalletID        string `bson:"wallet_id"`
-			TxID            string `bson:"txid"`
-			ActionIndex     int32  `bson:"action_index"`
-			RecipientAddress string `bson:"recipient_address"`
-			AmountZat       int64  `bson:"amount_zat"`
-			Height          int64  `bson:"height"`
-			Status          string `bson:"status"`
-			ConfirmedHeight *int64 `bson:"confirmed_height"`
-			InvoiceID       *string `bson:"invoice_id"`
-			DetectedAt      int64  `bson:"detected_at"`
-			UpdatedAt       int64  `bson:"updated_at"`
+			Seq              int64   `bson:"seq"`
+			WalletID         string  `bson:"wallet_id"`
+			TxID             string  `bson:"txid"`
+			ActionIndex      int32   `bson:"action_index"`
+			RecipientAddress string  `bson:"recipient_address"`
+			AmountZat        int64   `bson:"amount_zat"`
+			Height           int64   `bson:"height"`
+			Status           string  `bson:"status"`
+			ConfirmedHeight  *int64  `bson:"confirmed_height"`
+			InvoiceID        *string `bson:"invoice_id"`
+			DetectedAt       int64   `bson:"detected_at"`
+			UpdatedAt        int64   `bson:"updated_at"`
 		}
 		if err := cur.Decode(&doc); err != nil {
 			return nil, 0, err
@@ -1976,18 +1986,18 @@ func (s *Store) CreateRefund(ctx context.Context, req store.RefundCreate) (domai
 		}
 
 		doc := bson.M{
-			"_id":         refundID,
-			"seq":         seq,
-			"merchant_id": req.MerchantID,
-			"invoice_id":  nil,
+			"_id":                refundID,
+			"seq":                seq,
+			"merchant_id":        req.MerchantID,
+			"invoice_id":         nil,
 			"external_refund_id": nil,
-			"to_address":  req.ToAddress,
-			"amount_zat":  req.AmountZat,
-			"status":      string(status),
-			"sent_txid":   nil,
-			"notes":       req.Notes,
-			"created_at":  nowUnix,
-			"updated_at":  nowUnix,
+			"to_address":         req.ToAddress,
+			"amount_zat":         req.AmountZat,
+			"status":             string(status),
+			"sent_txid":          nil,
+			"notes":              req.Notes,
+			"created_at":         nowUnix,
+			"updated_at":         nowUnix,
 		}
 		if req.InvoiceID != "" {
 			doc["invoice_id"] = req.InvoiceID
@@ -2082,18 +2092,18 @@ func (s *Store) ListRefunds(ctx context.Context, f store.RefundFilter) (refunds 
 
 	for cur.Next(ctx) {
 		var doc struct {
-			ID              string `bson:"_id"`
-			Seq             int64  `bson:"seq"`
-			MerchantID      string `bson:"merchant_id"`
-			InvoiceID       *string `bson:"invoice_id"`
+			ID               string  `bson:"_id"`
+			Seq              int64   `bson:"seq"`
+			MerchantID       string  `bson:"merchant_id"`
+			InvoiceID        *string `bson:"invoice_id"`
 			ExternalRefundID *string `bson:"external_refund_id"`
-			ToAddress       string `bson:"to_address"`
-			AmountZat       int64  `bson:"amount_zat"`
-			Status          string `bson:"status"`
-			SentTxID        *string `bson:"sent_txid"`
-			Notes           string `bson:"notes"`
-			CreatedAtUnix   int64  `bson:"created_at"`
-			UpdatedAtUnix   int64  `bson:"updated_at"`
+			ToAddress        string  `bson:"to_address"`
+			AmountZat        int64   `bson:"amount_zat"`
+			Status           string  `bson:"status"`
+			SentTxID         *string `bson:"sent_txid"`
+			Notes            string  `bson:"notes"`
+			CreatedAtUnix    int64   `bson:"created_at"`
+			UpdatedAtUnix    int64   `bson:"updated_at"`
 		}
 		if err := cur.Decode(&doc); err != nil {
 			return nil, 0, err
@@ -2606,17 +2616,39 @@ func (s *Store) createReviewCase(ctx mongo.SessionContext, merchantID string, in
 		return nil
 	}
 
+	reasonStr := string(reason)
+	nowUnix := time.Now().UTC().Unix()
+
+	filter := bson.M{}
+	switch {
+	case invoiceID != nil && strings.TrimSpace(*invoiceID) != "":
+		filter = bson.M{
+			"merchant_id": merchantID,
+			"invoice_id":  strings.TrimSpace(*invoiceID),
+			"reason":      reasonStr,
+			"status":      string(domain.ReviewOpen),
+		}
+	case depWalletID != "" && depTxID != "":
+		filter = bson.M{
+			"deposit_wallet_id":    depWalletID,
+			"deposit_txid":         depTxID,
+			"deposit_action_index": depActionIndex,
+			"reason":               reasonStr,
+		}
+	default:
+		return nil
+	}
+
 	reviewID, err := newID("rev")
 	if err != nil {
 		return err
 	}
 
-	nowUnix := time.Now().UTC().Unix()
 	doc := bson.M{
 		"_id":         reviewID,
 		"merchant_id": merchantID,
 		"invoice_id":  invoiceID,
-		"reason":      string(reason),
+		"reason":      reasonStr,
 		"status":      string(domain.ReviewOpen),
 		"notes":       strings.TrimSpace(notes),
 		"created_at":  nowUnix,
@@ -2628,13 +2660,8 @@ func (s *Store) createReviewCase(ctx mongo.SessionContext, merchantID string, in
 		doc["deposit_action_index"] = depActionIndex
 	}
 
-	if _, err := s.c("review_cases").InsertOne(ctx, doc); err != nil {
-		if isDuplicateKey(err) {
-			return nil
-		}
-		return err
-	}
-	return nil
+	_, err = s.c("review_cases").UpdateOne(ctx, filter, bson.M{"$setOnInsert": doc}, options.Update().SetUpsert(true))
+	return err
 }
 
 func isDuplicateKey(err error) bool {
