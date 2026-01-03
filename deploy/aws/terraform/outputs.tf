@@ -8,6 +8,16 @@ output "admin_url" {
   description = "Admin dashboard URL (no TLS)."
 }
 
+output "vpc_id" {
+  value       = local.effective_vpc_id
+  description = "VPC ID (created or provided)."
+}
+
+output "subnet_id" {
+  value       = local.effective_subnet_id
+  description = "Subnet ID (created or provided)."
+}
+
 output "rds_endpoint" {
   value       = var.enable_rds_postgres ? aws_db_instance.junoscan[0].address : null
   description = "RDS Postgres endpoint (if enabled)."

@@ -6,7 +6,7 @@ This folder contains a **reference** Terraform stack for running:
 - `juno-scan` (Docker)
 - `juno-pay-server` (Docker, serves `/admin/`)
 
-It is intentionally modular and conservative: you can plug it into an existing VPC/subnets and optionally enable managed services like RDS/MSK.
+It is intentionally modular and conservative: by default it creates a small VPC + public subnet, but you can also plug it into an existing VPC/subnets and optionally enable managed services like RDS/MSK.
 
 ## Prereqs
 
@@ -42,6 +42,17 @@ terraform apply
 Outputs include the instance public IP and the URL for `/admin/`.
 
 Example variables: `terraform.tfvars.example`.
+
+## Networking
+
+Default (recommended for one-click deploy):
+
+- `create_network=true` (creates VPC + public subnet + internet gateway)
+
+To deploy into an existing VPC/subnet:
+
+- `create_network=false`
+- set `vpc_id` and `subnet_id`
 
 ## Optional: RDS (Postgres) for `juno-scan`
 
@@ -130,9 +141,6 @@ GitHub **variables** (same page → Variables):
 
 - `TF_STATE_BUCKET` (S3 bucket for Terraform state)
 - `TF_STATE_LOCK_TABLE` (DynamoDB table for state locking)
-- `AWS_VPC_ID`
-- `AWS_SUBNET_ID`
-- `AWS_ALLOWED_CIDRS_JSON` (example: `["203.0.113.0/24"]`)
 
 Optional variables:
 
@@ -147,4 +155,5 @@ Suggested defaults:
 - `aws_region`: your region (example `us-east-1`)
 - `name_prefix`: `juno-pay`
 - `juno_chain`: `mainnet`
+- `allowed_cidrs_json`: `["0.0.0.0/0"]` (or your admin IP range)
 - `tf_action`: `apply`

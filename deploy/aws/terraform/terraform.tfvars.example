@@ -1,8 +1,15 @@
 aws_region  = "us-east-1"
 name_prefix = "juno-pay"
 
-vpc_id    = "vpc-xxxxxxxx"
-subnet_id = "subnet-xxxxxxxx"
+# One-click networking (default):
+create_network      = true
+vpc_cidr            = "10.20.0.0/16"
+public_subnet_cidr  = "10.20.1.0/24"
+
+# If you want to deploy into an existing VPC/subnet:
+# create_network = false
+# vpc_id    = "vpc-xxxxxxxx"
+# subnet_id = "subnet-xxxxxxxx"
 
 allowed_cidrs = ["0.0.0.0/0"]
 

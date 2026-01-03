@@ -11,7 +11,7 @@ data "aws_ami" "al2023" {
 resource "aws_security_group" "host" {
   name        = "${var.name_prefix}-host"
   description = "juno-pay-server host SG"
-  vpc_id      = var.vpc_id
+  vpc_id      = local.effective_vpc_id
 
   ingress {
     description = "Pay server HTTP"
@@ -146,7 +146,7 @@ locals {
 resource "aws_instance" "host" {
   ami                         = data.aws_ami.al2023.id
   instance_type               = var.instance_type
-  subnet_id                   = var.subnet_id
+  subnet_id                   = local.effective_subnet_id
   vpc_security_group_ids      = [aws_security_group.host.id]
   iam_instance_profile        = aws_iam_instance_profile.host.name
   key_name                    = var.ssh_key_name
@@ -178,7 +178,7 @@ resource "aws_security_group" "rds" {
   count       = var.enable_rds_postgres ? 1 : 0
   name        = "${var.name_prefix}-rds"
   description = "RDS access for juno-scan"
-  vpc_id      = var.vpc_id
+  vpc_id      = local.effective_vpc_id
 
   ingress {
     from_port       = 5432
@@ -227,7 +227,7 @@ resource "aws_security_group" "msk" {
   count       = var.enable_msk ? 1 : 0
   name        = "${var.name_prefix}-msk"
   description = "MSK access for juno-pay-server"
-  vpc_id      = var.vpc_id
+  vpc_id      = local.effective_vpc_id
 
   ingress {
     description     = "Kafka plaintext"

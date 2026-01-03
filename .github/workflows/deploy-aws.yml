@@ -23,6 +23,10 @@ on:
         description: Confirmations required for confirmed deposit events
         required: true
         default: "100"
+      allowed_cidrs_json:
+        description: Allowed CIDRs for public HTTP ports (JSON array)
+        required: true
+        default: "[\"0.0.0.0/0\"]"
       juno_scan_repo:
         description: Git repo URL for juno-scan build
         required: true
@@ -67,9 +71,7 @@ jobs:
       TF_VAR_juno_chain: ${{ inputs.juno_chain }}
       TF_VAR_juno_scan_ua_hrp: ${{ inputs.juno_scan_ua_hrp }}
       TF_VAR_juno_scan_confirmations: ${{ inputs.juno_scan_confirmations }}
-      TF_VAR_vpc_id: ${{ vars.AWS_VPC_ID }}
-      TF_VAR_subnet_id: ${{ vars.AWS_SUBNET_ID }}
-      TF_VAR_allowed_cidrs: ${{ vars.AWS_ALLOWED_CIDRS_JSON }}
+      TF_VAR_allowed_cidrs: ${{ inputs.allowed_cidrs_json }}
 
     steps:
       - name: Checkout
@@ -90,9 +92,6 @@ jobs:
           set -euo pipefail
           : "${TF_STATE_BUCKET:?set GitHub variable TF_STATE_BUCKET}"
           : "${TF_STATE_LOCK_TABLE:?set GitHub variable TF_STATE_LOCK_TABLE}"
-          : "${TF_VAR_vpc_id:?set GitHub variable AWS_VPC_ID}"
-          : "${TF_VAR_subnet_id:?set GitHub variable AWS_SUBNET_ID}"
-          : "${TF_VAR_allowed_cidrs:?set GitHub variable AWS_ALLOWED_CIDRS_JSON (example: [\"203.0.113.0/24\"]) }"
           : "${AWS_DEPLOY_ROLE_ARN:?set GitHub secret AWS_DEPLOY_ROLE_ARN}"
           : "${JUNO_PAY_ADMIN_PASSWORD:?set GitHub secret JUNO_PAY_ADMIN_PASSWORD}"
           : "${JUNO_PAY_TOKEN_KEY_HEX:?set GitHub secret JUNO_PAY_TOKEN_KEY_HEX}"
@@ -184,4 +183,3 @@ jobs:
         shell: bash
         working-directory: deploy/aws/terraform
         run: terraform apply -input=false -auto-approve
-

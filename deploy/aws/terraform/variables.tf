@@ -10,14 +10,44 @@ variable "name_prefix" {
   default     = "juno-pay"
 }
 
+variable "create_network" {
+  type        = bool
+  description = "Create a VPC + public subnet automatically (recommended for one-click deploy)."
+  default     = true
+}
+
+variable "vpc_cidr" {
+  type        = string
+  description = "CIDR for the created VPC (only used when create_network=true)."
+  default     = "10.20.0.0/16"
+}
+
+variable "public_subnet_cidr" {
+  type        = string
+  description = "CIDR for the created public subnet (only used when create_network=true)."
+  default     = "10.20.1.0/24"
+}
+
 variable "vpc_id" {
   type        = string
   description = "VPC ID to deploy into."
+  default     = null
+
+  validation {
+    condition     = var.create_network || (var.vpc_id != null && trimspace(var.vpc_id) != "")
+    error_message = "vpc_id is required when create_network=false."
+  }
 }
 
 variable "subnet_id" {
   type        = string
   description = "Subnet ID for the EC2 instance."
+  default     = null
+
+  validation {
+    condition     = var.create_network || (var.subnet_id != null && trimspace(var.subnet_id) != "")
+    error_message = "subnet_id is required when create_network=false."
+  }
 }
 
 variable "allowed_cidrs" {
