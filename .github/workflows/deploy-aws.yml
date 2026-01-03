@@ -36,7 +36,7 @@ on:
         required: true
         default: main
       tag:
-        description: Docker tag (default: short sha)
+        description: "Docker tag (default: short sha)"
         required: false
       tf_action:
         description: Terraform action
