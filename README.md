@@ -44,9 +44,8 @@ docker compose up -d --build
 
 - `JUNO_PAY_ADDR` (default `127.0.0.1:8080`): HTTP listen address.
 - `JUNO_PAY_ADMIN_PASSWORD` (**required**): admin login password (cookie-based session).
-- `JUNO_PAY_ADMIN_UI_DIR` (optional): directory containing exported admin UI (serves under `/admin/`).
-  - If unset and `admin-dashboard/out` exists, it is used.
-  - In the Docker image, the UI is baked in and this is set automatically.
+- `JUNO_PAY_ADMIN_UI_DIR` (optional): directory containing exported admin UI to serve under `/admin/`.
+  - If unset, the server serves the embedded UI (release builds).
 - `JUNO_PAY_STORE_DRIVER` (default `sqlite`): `sqlite|postgres|mysql|mongo`.
 - `JUNO_PAY_STORE_DSN` (required for `postgres|mysql|mongo`): connection string / URI.
 - `JUNO_PAY_STORE_DB` (required for `mongo`): database name.
@@ -91,7 +90,7 @@ npm ci
 npm run build
 ```
 
-Then run `juno-pay-server` with `JUNO_PAY_ADMIN_UI_DIR=admin-dashboard/out` (or just run from repo root; it auto-detects `admin-dashboard/out`).
+Then run `juno-pay-server` with `JUNO_PAY_ADMIN_UI_DIR=admin-dashboard/out` (useful when iterating on the UI without rebuilding the Go binary).
 
 Typical admin flow:
 
