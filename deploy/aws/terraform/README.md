@@ -71,3 +71,80 @@ Set:
 - `msk_subnet_ids=[...]` (at least 2 subnets)
 
 Use the `msk_bootstrap_brokers` output when creating a `kafka` event sink in the admin dashboard.
+
+## CI/CD (GitHub Actions)
+
+This repo includes a GitHub Actions workflow: `.github/workflows/deploy-aws.yml`.
+
+It can:
+- build and push Docker images to ECR
+- bootstrap Terraform remote state (S3 + DynamoDB)
+- write required secrets to SSM
+- run `terraform apply`
+
+### 1) Create an AWS role for GitHub OIDC
+
+In your AWS account:
+
+1. Create an OIDC provider for `token.actions.githubusercontent.com` (audience: `sts.amazonaws.com`).
+2. Create an IAM role that GitHub can assume via OIDC with a trust policy like:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+        },
+        "StringLike": {
+          "token.actions.githubusercontent.com:sub": "repo:Abdullah1738/juno-pay-server:*"
+        }
+      }
+    }
+  ]
+}
+```
+
+Attach permissions that allow:
+- ECR create/push (images)
+- S3 + DynamoDB (Terraform state)
+- EC2/IAM (this stack)
+- SSM Put/GetParameter (admin password + token key)
+
+### 2) Configure GitHub secrets and variables
+
+GitHub **secrets** (Repository → Settings → Secrets and variables → Actions → Secrets):
+
+- `AWS_DEPLOY_ROLE_ARN` (the role created above)
+- `JUNO_PAY_ADMIN_PASSWORD`
+- `JUNO_PAY_TOKEN_KEY_HEX` (32-byte hex)
+
+GitHub **variables** (same page → Variables):
+
+- `TF_STATE_BUCKET` (S3 bucket for Terraform state)
+- `TF_STATE_LOCK_TABLE` (DynamoDB table for state locking)
+- `AWS_VPC_ID`
+- `AWS_SUBNET_ID`
+- `AWS_ALLOWED_CIDRS_JSON` (example: `["203.0.113.0/24"]`)
+
+Optional variables:
+
+- `JUNO_PAY_ADMIN_PASSWORD_SSM_PARAM` (default `/juno-pay/admin_password`)
+- `JUNO_PAY_TOKEN_KEY_SSM_PARAM` (default `/juno-pay/token_key_hex`)
+
+### 3) Run the workflow
+
+Go to GitHub → Actions → `deploy-aws` → Run workflow.
+
+Suggested defaults:
+- `aws_region`: your region (example `us-east-1`)
+- `name_prefix`: `juno-pay`
+- `juno_chain`: `mainnet`
+- `tf_action`: `apply`
