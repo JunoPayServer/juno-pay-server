@@ -8,27 +8,27 @@ RDS_SECRET_ARN="${rds_secret_arn}"
 PAY_STORE_DSN_PARAM="${pay_store_dsn_ssm_param}"
 DEMO_MERCHANT_API_KEY_PARAM="${demo_merchant_api_key_ssm_param}"
 
-mkdir -p "${ROOT}"
-cd "${ROOT}"
+mkdir -p "$ROOT"
+cd "$ROOT"
 
 dnf update -y
 dnf install -y docker docker-compose-plugin awscli python3
 systemctl enable docker
 systemctl start docker
 
-ACCOUNT_ID="$(aws sts get-caller-identity --region "${REGION}" --query Account --output text)"
-ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
-aws ecr get-login-password --region "${REGION}" | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+ACCOUNT_ID="$(aws sts get-caller-identity --region "$REGION" --query Account --output text)"
+ECR_REGISTRY="$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com"
+aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
-ADMIN_PASSWORD="$(aws ssm get-parameter --with-decryption --region "${REGION}" --name "${admin_password_ssm_param}" --query 'Parameter.Value' --output text)"
-TOKEN_KEY_HEX="$(aws ssm get-parameter --with-decryption --region "${REGION}" --name "${token_key_ssm_param}" --query 'Parameter.Value' --output text)"
+ADMIN_PASSWORD="$(aws ssm get-parameter --with-decryption --region "$REGION" --name "${admin_password_ssm_param}" --query 'Parameter.Value' --output text)"
+TOKEN_KEY_HEX="$(aws ssm get-parameter --with-decryption --region "$REGION" --name "${token_key_ssm_param}" --query 'Parameter.Value' --output text)"
 PAY_STORE_DSN=""
-if [[ -n "${PAY_STORE_DSN_PARAM}" ]]; then
-  PAY_STORE_DSN="$(aws ssm get-parameter --with-decryption --region "${REGION}" --name "${PAY_STORE_DSN_PARAM}" --query 'Parameter.Value' --output text)"
+if [[ -n "$PAY_STORE_DSN_PARAM" ]]; then
+  PAY_STORE_DSN="$(aws ssm get-parameter --with-decryption --region "$REGION" --name "$PAY_STORE_DSN_PARAM" --query 'Parameter.Value' --output text)"
 fi
 DEMO_MERCHANT_API_KEY=""
-if [[ -n "${DEMO_MERCHANT_API_KEY_PARAM}" ]]; then
-  DEMO_MERCHANT_API_KEY="$(aws ssm get-parameter --with-decryption --region "${REGION}" --name "${DEMO_MERCHANT_API_KEY_PARAM}" --query 'Parameter.Value' --output text)"
+if [[ -n "$DEMO_MERCHANT_API_KEY_PARAM" ]]; then
+  DEMO_MERCHANT_API_KEY="$(aws ssm get-parameter --with-decryption --region "$REGION" --name "$DEMO_MERCHANT_API_KEY_PARAM" --query 'Parameter.Value' --output text)"
 fi
 export ADMIN_PASSWORD TOKEN_KEY_HEX PAY_STORE_DSN DEMO_MERCHANT_API_KEY REGION RDS_SECRET_ARN
 
