@@ -16,6 +16,12 @@ allowed_cidrs = ["0.0.0.0/0"]
 admin_password_ssm_param = "/juno-pay/admin_password"
 token_key_ssm_param      = "/juno-pay/token_key_hex"
 
+# Demo app (optional).
+enable_demo_app                 = true
+demo_port                       = 80
+demo_allowed_cidrs              = ["0.0.0.0/0"]
+demo_merchant_api_key_ssm_param = "/juno-pay/demo_merchant_api_key"
+
 # Optional: external DB for juno-pay-server store.
 # pay_store_driver       = "postgres" # sqlite|postgres|mysql|mongo
 # pay_store_dsn_ssm_param = "/juno-pay/pay_store_dsn"
@@ -25,6 +31,7 @@ token_key_ssm_param      = "/juno-pay/token_key_hex"
 image_juno_pay_server = "123456789012.dkr.ecr.us-east-1.amazonaws.com/juno-pay-juno-pay-server:TAG"
 image_junocashd       = "123456789012.dkr.ecr.us-east-1.amazonaws.com/juno-pay-junocashd:TAG"
 image_juno_scan       = "123456789012.dkr.ecr.us-east-1.amazonaws.com/juno-pay-juno-scan:TAG"
+image_demo_app        = "123456789012.dkr.ecr.us-east-1.amazonaws.com/juno-pay-juno-demo-app:TAG"
 
 juno_chain = "mainnet"
 

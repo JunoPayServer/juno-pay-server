@@ -22,6 +22,17 @@ resource "aws_security_group" "host" {
   }
 
   dynamic "ingress" {
+    for_each = var.enable_demo_app ? [1] : []
+    content {
+      description = "Demo app HTTP"
+      from_port   = var.demo_port
+      to_port     = var.demo_port
+      protocol    = "tcp"
+      cidr_blocks = var.demo_allowed_cidrs
+    }
+  }
+
+  dynamic "ingress" {
     for_each = length(var.ssh_allowed_cidrs) > 0 ? [1] : []
     content {
       description = "SSH"
@@ -90,6 +101,17 @@ data "aws_iam_policy_document" "host_inline" {
     }
   }
 
+  dynamic "statement" {
+    for_each = var.demo_merchant_api_key_ssm_param != "" ? [1] : []
+    content {
+      sid     = "ReadDemoMerchantAPIKey"
+      actions = ["ssm:GetParameter", "ssm:GetParameters"]
+      resources = [
+        "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${var.demo_merchant_api_key_ssm_param}",
+      ]
+    }
+  }
+
   statement {
     sid       = "DecryptSSMDefaultKey"
     actions   = ["kms:Decrypt"]
@@ -124,22 +146,26 @@ resource "aws_iam_instance_profile" "host" {
 
 locals {
   compose_yml = templatefile("${path.module}/templates/docker-compose.yml.tftpl", {
-    image_junocashd     = var.image_junocashd
-    image_juno_scan     = var.image_juno_scan
-    image_juno_pay      = var.image_juno_pay_server
-    pay_server_port     = var.pay_server_port
-    juno_chain          = var.juno_chain
-    juno_scan_ua_hrp    = var.juno_scan_ua_hrp
-    juno_scan_confirms  = var.juno_scan_confirmations
-    pay_store_driver    = var.pay_store_driver
-    pay_store_db        = var.pay_store_db
-    pay_store_prefix    = var.pay_store_prefix
-    enable_rds_postgres = var.enable_rds_postgres
-    rds_endpoint        = var.enable_rds_postgres ? aws_db_instance.junoscan[0].address : ""
-    rds_port            = var.enable_rds_postgres ? aws_db_instance.junoscan[0].port : 0
-    rds_db_name         = var.enable_rds_postgres ? aws_db_instance.junoscan[0].db_name : ""
-    rds_username        = var.enable_rds_postgres ? aws_db_instance.junoscan[0].username : ""
-    rds_secret_arn      = var.enable_rds_postgres ? aws_db_instance.junoscan[0].master_user_secret[0].secret_arn : ""
+    image_junocashd      = var.image_junocashd
+    image_juno_scan      = var.image_juno_scan
+    image_juno_pay       = var.image_juno_pay_server
+    enable_demo_app      = var.enable_demo_app
+    image_demo_app       = var.enable_demo_app ? var.image_demo_app : ""
+    demo_port            = var.demo_port
+    demo_api_key_enabled = var.demo_merchant_api_key_ssm_param != ""
+    pay_server_port      = var.pay_server_port
+    juno_chain           = var.juno_chain
+    juno_scan_ua_hrp     = var.juno_scan_ua_hrp
+    juno_scan_confirms   = var.juno_scan_confirmations
+    pay_store_driver     = var.pay_store_driver
+    pay_store_db         = var.pay_store_db
+    pay_store_prefix     = var.pay_store_prefix
+    enable_rds_postgres  = var.enable_rds_postgres
+    rds_endpoint         = var.enable_rds_postgres ? aws_db_instance.junoscan[0].address : ""
+    rds_port             = var.enable_rds_postgres ? aws_db_instance.junoscan[0].port : 0
+    rds_db_name          = var.enable_rds_postgres ? aws_db_instance.junoscan[0].db_name : ""
+    rds_username         = var.enable_rds_postgres ? aws_db_instance.junoscan[0].username : ""
+    rds_secret_arn       = var.enable_rds_postgres ? aws_db_instance.junoscan[0].master_user_secret[0].secret_arn : ""
   })
 }
 
@@ -158,14 +184,15 @@ resource "aws_instance" "host" {
   }
 
   user_data = templatefile("${path.module}/templates/user-data.sh.tftpl", {
-    name_prefix              = var.name_prefix
-    aws_region               = var.aws_region
-    pay_server_port          = var.pay_server_port
-    admin_password_ssm_param = var.admin_password_ssm_param
-    token_key_ssm_param      = var.token_key_ssm_param
-    pay_store_dsn_ssm_param  = var.pay_store_dsn_ssm_param
-    rds_secret_arn           = var.enable_rds_postgres ? aws_db_instance.junoscan[0].master_user_secret[0].secret_arn : ""
-    docker_compose_yml       = local.compose_yml
+    name_prefix                     = var.name_prefix
+    aws_region                      = var.aws_region
+    pay_server_port                 = var.pay_server_port
+    admin_password_ssm_param        = var.admin_password_ssm_param
+    token_key_ssm_param             = var.token_key_ssm_param
+    pay_store_dsn_ssm_param         = var.pay_store_dsn_ssm_param
+    demo_merchant_api_key_ssm_param = var.demo_merchant_api_key_ssm_param
+    rds_secret_arn                  = var.enable_rds_postgres ? aws_db_instance.junoscan[0].master_user_secret[0].secret_arn : ""
+    docker_compose_yml              = local.compose_yml
   })
   user_data_replace_on_change = true
 

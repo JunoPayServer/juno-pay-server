@@ -8,6 +8,11 @@ output "admin_url" {
   description = "Admin dashboard URL (no TLS)."
 }
 
+output "demo_url" {
+  value       = var.enable_demo_app ? "http://${aws_instance.host.public_ip}:${var.demo_port}/" : null
+  description = "Demo app URL (no TLS, if enabled)."
+}
+
 output "vpc_id" {
   value       = local.effective_vpc_id
   description = "VPC ID (created or provided)."

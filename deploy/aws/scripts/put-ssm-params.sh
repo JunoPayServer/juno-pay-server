@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --region REGION --admin-password-param NAME --token-key-param NAME [--pay-store-dsn-param NAME]" >&2
+  echo "usage: $0 --region REGION --admin-password-param NAME --token-key-param NAME [--pay-store-dsn-param NAME] [--demo-merchant-api-key-param NAME]" >&2
   exit 2
 }
 
@@ -10,6 +10,7 @@ REGION=""
 ADMIN_PARAM=""
 TOKEN_PARAM=""
 PAY_STORE_PARAM=""
+DEMO_API_KEY_PARAM=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -17,6 +18,7 @@ while [[ $# -gt 0 ]]; do
     --admin-password-param) ADMIN_PARAM="$2"; shift 2 ;;
     --token-key-param) TOKEN_PARAM="$2"; shift 2 ;;
     --pay-store-dsn-param) PAY_STORE_PARAM="$2"; shift 2 ;;
+    --demo-merchant-api-key-param) DEMO_API_KEY_PARAM="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
@@ -39,10 +41,23 @@ if [[ -n "${PAY_STORE_PARAM}" ]]; then
   fi
 fi
 
+DEMO_API_KEY=""
+if [[ -n "${DEMO_API_KEY_PARAM}" ]]; then
+  read -r -s -p "Demo merchant API key: " DEMO_API_KEY
+  echo
+  if [[ -z "${DEMO_API_KEY}" ]]; then
+    echo "demo merchant API key cannot be empty when --demo-merchant-api-key-param is set" >&2
+    exit 2
+  fi
+fi
+
 aws ssm put-parameter --region "${REGION}" --name "${ADMIN_PARAM}" --type SecureString --overwrite --value "${ADMIN_PASSWORD}" >/dev/null
 aws ssm put-parameter --region "${REGION}" --name "${TOKEN_PARAM}" --type SecureString --overwrite --value "${TOKEN_KEY_HEX}" >/dev/null
 if [[ -n "${PAY_STORE_PARAM}" ]]; then
   aws ssm put-parameter --region "${REGION}" --name "${PAY_STORE_PARAM}" --type SecureString --overwrite --value "${PAY_STORE_DSN}" >/dev/null
+fi
+if [[ -n "${DEMO_API_KEY_PARAM}" ]]; then
+  aws ssm put-parameter --region "${REGION}" --name "${DEMO_API_KEY_PARAM}" --type SecureString --overwrite --value "${DEMO_API_KEY}" >/dev/null
 fi
 
 echo "OK"

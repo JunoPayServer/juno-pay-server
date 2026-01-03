@@ -9,6 +9,7 @@ Builds and pushes Docker images to ECR:
   - juno-pay-server
   - junocashd
   - juno-scan
+  - juno-demo-app
 EOF
   exit 2
 }
@@ -54,14 +55,17 @@ ensure_repo() {
 PAY_REPO="${NAME_PREFIX}-juno-pay-server"
 JUNOCASHD_REPO="${NAME_PREFIX}-junocashd"
 SCAN_REPO_NAME="${NAME_PREFIX}-juno-scan"
+DEMO_REPO="${NAME_PREFIX}-juno-demo-app"
 
 ensure_repo "${PAY_REPO}"
 ensure_repo "${JUNOCASHD_REPO}"
 ensure_repo "${SCAN_REPO_NAME}"
+ensure_repo "${DEMO_REPO}"
 
 PAY_IMAGE="${REGISTRY}/${PAY_REPO}:${TAG}"
 JUNOCASHD_IMAGE="${REGISTRY}/${JUNOCASHD_REPO}:${TAG}"
 SCAN_IMAGE="${REGISTRY}/${SCAN_REPO_NAME}:${TAG}"
+DEMO_IMAGE="${REGISTRY}/${DEMO_REPO}:${TAG}"
 
 docker buildx build --platform linux/amd64 --push -t "${PAY_IMAGE}" -f Dockerfile .
 docker buildx build --platform linux/amd64 --push -t "${JUNOCASHD_IMAGE}" -f docker/junocashd/Dockerfile .
@@ -69,6 +73,7 @@ docker buildx build --platform linux/amd64 --push -t "${SCAN_IMAGE}" \
   --build-arg "JUNO_SCAN_REPO=${JUNO_SCAN_REPO}" \
   --build-arg "JUNO_SCAN_REF=${JUNO_SCAN_REF}" \
   -f docker/juno-scan/Dockerfile .
+docker buildx build --platform linux/amd64 --push -t "${DEMO_IMAGE}" -f docker/demo-app/Dockerfile .
 
 cat <<EOF
 OK
@@ -76,5 +81,5 @@ OK
 image_juno_pay_server = "${PAY_IMAGE}"
 image_junocashd       = "${JUNOCASHD_IMAGE}"
 image_juno_scan       = "${SCAN_IMAGE}"
+image_demo_app        = "${DEMO_IMAGE}"
 EOF
-

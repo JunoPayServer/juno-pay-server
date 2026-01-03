@@ -6,6 +6,7 @@ REGION="${aws_region}"
 ROOT="/opt/${name_prefix}"
 RDS_SECRET_ARN="${rds_secret_arn}"
 PAY_STORE_DSN_PARAM="${pay_store_dsn_ssm_param}"
+DEMO_MERCHANT_API_KEY_PARAM="${demo_merchant_api_key_ssm_param}"
 
 mkdir -p "${ROOT}"
 cd "${ROOT}"
@@ -25,7 +26,11 @@ PAY_STORE_DSN=""
 if [[ -n "${PAY_STORE_DSN_PARAM}" ]]; then
   PAY_STORE_DSN="$(aws ssm get-parameter --with-decryption --region "${REGION}" --name "${PAY_STORE_DSN_PARAM}" --query 'Parameter.Value' --output text)"
 fi
-export ADMIN_PASSWORD TOKEN_KEY_HEX PAY_STORE_DSN REGION RDS_SECRET_ARN
+DEMO_MERCHANT_API_KEY=""
+if [[ -n "${DEMO_MERCHANT_API_KEY_PARAM}" ]]; then
+  DEMO_MERCHANT_API_KEY="$(aws ssm get-parameter --with-decryption --region "${REGION}" --name "${DEMO_MERCHANT_API_KEY_PARAM}" --query 'Parameter.Value' --output text)"
+fi
+export ADMIN_PASSWORD TOKEN_KEY_HEX PAY_STORE_DSN DEMO_MERCHANT_API_KEY REGION RDS_SECRET_ARN
 
 cat > docker-compose.yml <<'EOF'
 ${docker_compose_yml}
@@ -41,6 +46,7 @@ compose_path = "docker-compose.yml"
 admin_pw = os.environ["ADMIN_PASSWORD"]
 token_key = os.environ["TOKEN_KEY_HEX"]
 pay_store_dsn = os.environ.get("PAY_STORE_DSN", "").strip()
+demo_api_key = os.environ.get("DEMO_MERCHANT_API_KEY", "").strip()
 region = os.environ["REGION"]
 rds_secret_arn = os.environ.get("RDS_SECRET_ARN", "").strip()
 
@@ -54,6 +60,11 @@ if "__PAY_STORE_DSN__" in s:
   if not pay_store_dsn:
     raise SystemExit("pay store DSN placeholder present but PAY_STORE_DSN is empty")
   s = s.replace("__PAY_STORE_DSN__", pay_store_dsn)
+
+if "__DEMO_MERCHANT_API_KEY__" in s:
+  if not demo_api_key:
+    raise SystemExit("demo merchant api key placeholder present but DEMO_MERCHANT_API_KEY is empty")
+  s = s.replace("__DEMO_MERCHANT_API_KEY__", demo_api_key)
 
 if "__RDS_PASSWORD__" in s:
   if not rds_secret_arn:

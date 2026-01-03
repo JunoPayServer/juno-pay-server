@@ -137,6 +137,24 @@ variable "pay_store_prefix" {
   default     = ""
 }
 
+variable "enable_demo_app" {
+  type        = bool
+  description = "Run the demo checkout app (Next.js) alongside the backend."
+  default     = true
+}
+
+variable "demo_port" {
+  type        = number
+  description = "Host port to expose the demo app on."
+  default     = 80
+}
+
+variable "demo_allowed_cidrs" {
+  type        = list(string)
+  description = "CIDRs allowed to reach the demo app HTTP port."
+  default     = ["0.0.0.0/0"]
+}
+
 variable "image_juno_pay_server" {
   type        = string
   description = "Docker image URI for juno-pay-server (recommended: ECR)."
@@ -150,6 +168,23 @@ variable "image_junocashd" {
 variable "image_juno_scan" {
   type        = string
   description = "Docker image URI for juno-scan."
+}
+
+variable "image_demo_app" {
+  type        = string
+  description = "Docker image URI for the demo app (required when enable_demo_app=true)."
+  default     = null
+
+  validation {
+    condition     = !var.enable_demo_app || (var.image_demo_app != null && trimspace(var.image_demo_app) != "")
+    error_message = "image_demo_app is required when enable_demo_app=true."
+  }
+}
+
+variable "demo_merchant_api_key_ssm_param" {
+  type        = string
+  description = "Optional SSM parameter containing JUNO_PAY_MERCHANT_API_KEY for the demo app."
+  default     = ""
 }
 
 variable "juno_chain" {

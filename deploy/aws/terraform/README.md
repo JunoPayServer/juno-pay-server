@@ -21,6 +21,7 @@ This stack expects the following SSM parameters to exist (SecureString recommend
 - `admin_password_ssm_param` (default: `/juno-pay/admin_password`)
 - `token_key_ssm_param` (default: `/juno-pay/token_key_hex`)
 - Optional: `pay_store_dsn_ssm_param` (connection string for `juno-pay-server` when using `postgres|mysql|mongo`)
+- Optional: `demo_merchant_api_key_ssm_param` (merchant API key used by the demo app for invoice creation)
 
 Create them using the helper script:
 
@@ -29,7 +30,8 @@ Create them using the helper script:
   --region us-east-1 \
   --admin-password-param /juno-pay/admin_password \
   --token-key-param /juno-pay/token_key_hex \
-  --pay-store-dsn-param /juno-pay/pay_store_dsn
+  --pay-store-dsn-param /juno-pay/pay_store_dsn \
+  --demo-merchant-api-key-param /juno-pay/demo_merchant_api_key
 ```
 
 ## Usage
@@ -53,6 +55,12 @@ To deploy into an existing VPC/subnet:
 
 - `create_network=false`
 - set `vpc_id` and `subnet_id`
+
+## Demo app
+
+By default this stack also runs the demo checkout app (Next.js) on `demo_port` (default `80`).
+
+To make invoice creation work, set `demo_merchant_api_key_ssm_param` to an SSM SecureString containing a merchant API key.
 
 ## Optional: RDS (Postgres) for `juno-scan`
 
@@ -136,6 +144,7 @@ GitHub **secrets** (Repository → Settings → Secrets and variables → Action
 - `AWS_DEPLOY_ROLE_ARN` (the role created above)
 - `JUNO_PAY_ADMIN_PASSWORD`
 - `JUNO_PAY_TOKEN_KEY_HEX` (32-byte hex)
+- Optional: `DEMO_MERCHANT_API_KEY` (used by the demo app for invoice creation)
 
 GitHub **variables** (same page → Variables):
 
@@ -146,6 +155,7 @@ Optional variables:
 
 - `JUNO_PAY_ADMIN_PASSWORD_SSM_PARAM` (default `/juno-pay/admin_password`)
 - `JUNO_PAY_TOKEN_KEY_SSM_PARAM` (default `/juno-pay/token_key_hex`)
+- `JUNO_PAY_DEMO_MERCHANT_API_KEY_SSM_PARAM` (default `/juno-pay/demo_merchant_api_key`)
 
 ### 3) Run the workflow
 

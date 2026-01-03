@@ -87,6 +87,22 @@ services:
     volumes:
       - payserver-data:/data
 
+%{ if enable_demo_app ~}
+  demo-app:
+    image: ${image_demo_app}
+    restart: unless-stopped
+    depends_on:
+      juno-pay-server:
+        condition: service_started
+    environment:
+      JUNO_PAY_BASE_URL: http://juno-pay-server:8080
+%{ if demo_api_key_enabled ~}
+      JUNO_PAY_MERCHANT_API_KEY: __DEMO_MERCHANT_API_KEY__
+%{ endif ~}
+    ports:
+      - "${demo_port}:3000"
+%{ endif ~}
+
 volumes:
   junocashd-data:
   junoscan-data:

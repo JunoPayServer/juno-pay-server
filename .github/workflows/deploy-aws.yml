@@ -134,6 +134,7 @@ jobs:
           echo "TF_VAR_image_juno_pay_server=${REGISTRY}/${NAME_PREFIX}-juno-pay-server:${TAG_INPUT}" >> "${GITHUB_ENV}"
           echo "TF_VAR_image_junocashd=${REGISTRY}/${NAME_PREFIX}-junocashd:${TAG_INPUT}" >> "${GITHUB_ENV}"
           echo "TF_VAR_image_juno_scan=${REGISTRY}/${NAME_PREFIX}-juno-scan:${TAG_INPUT}" >> "${GITHUB_ENV}"
+          echo "TF_VAR_image_demo_app=${REGISTRY}/${NAME_PREFIX}-juno-demo-app:${TAG_INPUT}" >> "${GITHUB_ENV}"
 
         env:
           TAG_INPUT: ${{ inputs.tag }}
@@ -144,15 +145,23 @@ jobs:
           set -euo pipefail
           ADMIN_PARAM="${ADMIN_PARAM:-/juno-pay/admin_password}"
           TOKEN_PARAM="${TOKEN_PARAM:-/juno-pay/token_key_hex}"
+          DEMO_PARAM="${DEMO_PARAM:-/juno-pay/demo_merchant_api_key}"
 
           aws ssm put-parameter --region "${AWS_REGION}" --name "${ADMIN_PARAM}" --type SecureString --overwrite --value "${JUNO_PAY_ADMIN_PASSWORD}" >/dev/null
           aws ssm put-parameter --region "${AWS_REGION}" --name "${TOKEN_PARAM}" --type SecureString --overwrite --value "${JUNO_PAY_TOKEN_KEY_HEX}" >/dev/null
+
+          if [[ -n "${DEMO_MERCHANT_API_KEY:-}" ]]; then
+            aws ssm put-parameter --region "${AWS_REGION}" --name "${DEMO_PARAM}" --type SecureString --overwrite --value "${DEMO_MERCHANT_API_KEY}" >/dev/null
+            echo "TF_VAR_demo_merchant_api_key_ssm_param=${DEMO_PARAM}" >> "${GITHUB_ENV}"
+          fi
           echo "OK"
         env:
           ADMIN_PARAM: ${{ vars.JUNO_PAY_ADMIN_PASSWORD_SSM_PARAM }}
           TOKEN_PARAM: ${{ vars.JUNO_PAY_TOKEN_KEY_SSM_PARAM }}
+          DEMO_PARAM: ${{ vars.JUNO_PAY_DEMO_MERCHANT_API_KEY_SSM_PARAM }}
           JUNO_PAY_ADMIN_PASSWORD: ${{ secrets.JUNO_PAY_ADMIN_PASSWORD }}
           JUNO_PAY_TOKEN_KEY_HEX: ${{ secrets.JUNO_PAY_TOKEN_KEY_HEX }}
+          DEMO_MERCHANT_API_KEY: ${{ secrets.DEMO_MERCHANT_API_KEY }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3

@@ -96,6 +96,22 @@ services:
     volumes:
       - payserver-data:/data
 
+  demo-app:
+    container_name: juno-pay-server-demo
+    platform: linux/amd64
+    image: juno-pay-server/demo-app:local
+    build:
+      context: .
+      dockerfile: docker/demo-app/Dockerfile
+    depends_on:
+      juno-pay-server:
+        condition: service_started
+    environment:
+      JUNO_PAY_BASE_URL: http://juno-pay-server:8080
+      JUNO_PAY_MERCHANT_API_KEY: ${JUNO_PAY_DEMO_MERCHANT_API_KEY:-}
+    ports:
+      - "${JUNO_DEMO_PORT_HOST:-18083}:3000"
+
 volumes:
   junocashd-data:
   junoscan-data:
