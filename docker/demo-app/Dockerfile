@@ -4,6 +4,7 @@ WORKDIR /src/demo-app
 COPY demo-app/package.json demo-app/package-lock.json ./
 RUN npm ci
 COPY demo-app/ ./
+RUN mkdir -p public
 RUN npm run build
 
 FROM --platform=linux/amd64 node:20-bookworm-slim
