@@ -23,7 +23,7 @@ resource "terraform_data" "validate" {
     }
 
     precondition {
-      condition = !var.enable_demo_app || trimspace(coalesce(var.image_demo_app, "")) != ""
+      condition     = !var.enable_demo_app || trimspace(coalesce(var.image_demo_app, "")) != ""
       error_message = "image_demo_app is required when enable_demo_app=true."
     }
 
