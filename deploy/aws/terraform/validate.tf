@@ -6,8 +6,8 @@ resource "terraform_data" "validate" {
   lifecycle {
     precondition {
       condition = var.create_network || (
-        var.vpc_id != null && trimspace(var.vpc_id) != "" &&
-        var.subnet_id != null && trimspace(var.subnet_id) != ""
+        trimspace(coalesce(var.vpc_id, "")) != "" &&
+        trimspace(coalesce(var.subnet_id, "")) != ""
       )
       error_message = "When create_network=false you must set vpc_id and subnet_id."
     }
@@ -23,9 +23,7 @@ resource "terraform_data" "validate" {
     }
 
     precondition {
-      condition = !var.enable_demo_app || (
-        var.image_demo_app != null && trimspace(var.image_demo_app) != ""
-      )
+      condition = !var.enable_demo_app || trimspace(coalesce(var.image_demo_app, "")) != ""
       error_message = "image_demo_app is required when enable_demo_app=true."
     }
 
@@ -40,4 +38,3 @@ resource "terraform_data" "validate" {
     }
   }
 }
-
