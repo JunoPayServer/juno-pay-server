@@ -32,22 +32,12 @@ variable "vpc_id" {
   type        = string
   description = "VPC ID to deploy into."
   default     = null
-
-  validation {
-    condition     = var.create_network || (var.vpc_id != null && trimspace(var.vpc_id) != "")
-    error_message = "vpc_id is required when create_network=false."
-  }
 }
 
 variable "subnet_id" {
   type        = string
   description = "Subnet ID for the EC2 instance."
   default     = null
-
-  validation {
-    condition     = var.create_network || (var.subnet_id != null && trimspace(var.subnet_id) != "")
-    error_message = "subnet_id is required when create_network=false."
-  }
 }
 
 variable "allowed_cidrs" {
@@ -113,22 +103,12 @@ variable "pay_store_dsn_ssm_param" {
   type        = string
   description = "Optional SSM parameter name containing JUNO_PAY_STORE_DSN (required for non-sqlite drivers)."
   default     = ""
-
-  validation {
-    condition     = var.pay_store_driver == "sqlite" || var.pay_store_dsn_ssm_param != ""
-    error_message = "pay_store_dsn_ssm_param is required when pay_store_driver is not sqlite."
-  }
 }
 
 variable "pay_store_db" {
   type        = string
   description = "MongoDB database name for pay_store_driver=mongo."
   default     = ""
-
-  validation {
-    condition     = var.pay_store_driver != "mongo" || var.pay_store_db != ""
-    error_message = "pay_store_db is required when pay_store_driver=mongo."
-  }
 }
 
 variable "pay_store_prefix" {
@@ -174,11 +154,6 @@ variable "image_demo_app" {
   type        = string
   description = "Docker image URI for the demo app (required when enable_demo_app=true)."
   default     = null
-
-  validation {
-    condition     = !var.enable_demo_app || (var.image_demo_app != null && trimspace(var.image_demo_app) != "")
-    error_message = "image_demo_app is required when enable_demo_app=true."
-  }
 }
 
 variable "demo_merchant_api_key_ssm_param" {
@@ -235,8 +210,8 @@ variable "msk_subnet_ids" {
   default     = []
 
   validation {
-    condition     = !var.enable_msk || length(var.msk_subnet_ids) >= 2
-    error_message = "msk_subnet_ids must include at least 2 subnets when enable_msk=true."
+    condition     = length(var.msk_subnet_ids) == 0 || length(var.msk_subnet_ids) >= 2
+    error_message = "msk_subnet_ids must include at least 2 subnets (or be empty)."
   }
 }
 
