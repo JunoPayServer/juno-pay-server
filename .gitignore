@@ -5,6 +5,7 @@
 /bin/
 /.cache/
 *.sqlite
+/internal/api/adminui_dist/
 
 # Rust
 /rust/**/target/

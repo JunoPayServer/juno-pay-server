@@ -1,13 +1,30 @@
 package api
 
 import (
+	"io/fs"
 	"net/http"
+	"os"
 	"strings"
 )
 
 func newAdminUIHandler(dir string) http.Handler {
-	fs := http.FileServer(http.Dir(dir))
-	stripped := http.StripPrefix("/admin", fs)
+	var webfs fs.FS
+	if dir = strings.TrimSpace(dir); dir != "" {
+		if st, err := os.Stat(dir); err == nil && st.IsDir() {
+			webfs = os.DirFS(dir)
+		}
+	} else if embedded, ok := embeddedAdminUI(); ok {
+		webfs = embedded
+	}
+
+	if webfs == nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.NotFound(w, r)
+		})
+	}
+
+	files := http.FileServer(http.FS(webfs))
+	stripped := http.StripPrefix("/admin", files)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

@@ -223,9 +223,6 @@ func defaultAdminUIDir() string {
 	if v, ok := os.LookupEnv("JUNO_PAY_ADMIN_UI_DIR"); ok {
 		return strings.TrimSpace(v)
 	}
-	if _, err := os.Stat("admin-dashboard/out"); err == nil {
-		return "admin-dashboard/out"
-	}
 	return ""
 }
 

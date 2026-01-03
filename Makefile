@@ -1,4 +1,4 @@
-.PHONY: build rust-build rust-test test test-unit test-integration test-e2e admin-deps admin-build admin-test-unit admin-test-e2e demo-deps demo-build demo-test-unit demo-test-e2e fmt tidy clean
+.PHONY: build rust-build rust-test test test-unit test-integration test-e2e admin-deps admin-build admin-embed admin-test-unit admin-test-e2e demo-deps demo-build demo-test-unit demo-test-e2e fmt tidy clean
 
 TESTFLAGS ?=
 
@@ -11,12 +11,18 @@ BIN := $(BIN_DIR)/juno-pay-server
 RUST_MANIFEST := rust/keys/Cargo.toml
 ADMIN_DIR := admin-dashboard
 ADMIN_STAMP := $(ADMIN_DIR)/node_modules/.install-stamp
+ADMIN_EMBED_DIR := internal/api/adminui_dist
 DEMO_DIR := demo-app
 DEMO_STAMP := $(DEMO_DIR)/node_modules/.install-stamp
 
-build: rust-build
+admin-embed: admin-build
+	rm -rf $(ADMIN_EMBED_DIR)
+	mkdir -p $(ADMIN_EMBED_DIR)
+	cp -R $(ADMIN_DIR)/out/* $(ADMIN_EMBED_DIR)/
+
+build: rust-build admin-embed
 	@mkdir -p $(BIN_DIR)
-	go build -o $(BIN) ./cmd/juno-pay-server
+	go build -tags=adminui -o $(BIN) ./cmd/juno-pay-server
 
 rust-build:
 	cargo build --release --manifest-path $(RUST_MANIFEST)
