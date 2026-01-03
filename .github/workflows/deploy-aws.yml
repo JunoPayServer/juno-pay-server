@@ -72,6 +72,7 @@ jobs:
       TF_VAR_juno_scan_ua_hrp: ${{ inputs.juno_scan_ua_hrp }}
       TF_VAR_juno_scan_confirmations: ${{ inputs.juno_scan_confirmations }}
       TF_VAR_allowed_cidrs: ${{ inputs.allowed_cidrs_json }}
+      TF_VAR_demo_allowed_cidrs: ${{ inputs.allowed_cidrs_json }}
 
     steps:
       - name: Checkout
