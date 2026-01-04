@@ -12,7 +12,7 @@ mkdir -p "$ROOT"
 cd "$ROOT"
 
 dnf update -y
-dnf install -y docker awscli python3 curl
+dnf install -y docker awscli python3
 systemctl enable docker
 systemctl start docker
 
