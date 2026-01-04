@@ -50,7 +50,9 @@ COPY --from=go-build /out/juno-pay-server /usr/local/bin/juno-pay-server
 COPY --from=rust-build /src/rust/keys/target/release/libjuno_keys.so /usr/local/lib/libjuno_keys.so
 
 RUN mkdir -p /data \
-  && chown -R 10001:nogroup /data
+  && chown -R 10001:nogroup /data \
+  && : > /data/.keep \
+  && chown 10001:nogroup /data/.keep
 
 ENV LD_LIBRARY_PATH=/usr/local/lib
 ENV JUNO_PAY_ADDR=0.0.0.0:8080
