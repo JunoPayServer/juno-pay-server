@@ -151,7 +151,7 @@ jobs:
           aws ssm put-parameter --region "${AWS_REGION}" --name "${ADMIN_PARAM}" --type SecureString --overwrite --value "${JUNO_PAY_ADMIN_PASSWORD}" >/dev/null
           aws ssm put-parameter --region "${AWS_REGION}" --name "${TOKEN_PARAM}" --type SecureString --overwrite --value "${JUNO_PAY_TOKEN_KEY_HEX}" >/dev/null
 
-          if [[ -n "${DEMO_MERCHANT_API_KEY:-}" ]]; then
+          if [[ -n "${DEMO_MERCHANT_API_KEY:-}" && "${DEMO_MERCHANT_API_KEY}" != "-" ]]; then
             aws ssm put-parameter --region "${AWS_REGION}" --name "${DEMO_PARAM}" --type SecureString --overwrite --value "${DEMO_MERCHANT_API_KEY}" >/dev/null
             echo "TF_VAR_demo_merchant_api_key_ssm_param=${DEMO_PARAM}" >> "${GITHUB_ENV}"
           fi

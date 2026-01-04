@@ -115,18 +115,18 @@ rds_secret_arn = os.environ.get("RDS_SECRET_ARN", "").strip()
 with open(compose_path, "r", encoding="utf-8") as f:
   s = f.read()
 
-s = s.replace("__ADMIN_PASSWORD__", admin_pw)
-s = s.replace("__TOKEN_KEY_HEX__", token_key)
+s = s.replace("__ADMIN_PASSWORD__", json.dumps(admin_pw))
+s = s.replace("__TOKEN_KEY_HEX__", json.dumps(token_key))
 
 if "__PAY_STORE_DSN__" in s:
   if not pay_store_dsn:
     raise SystemExit("pay store DSN placeholder present but PAY_STORE_DSN is empty")
-  s = s.replace("__PAY_STORE_DSN__", pay_store_dsn)
+  s = s.replace("__PAY_STORE_DSN__", json.dumps(pay_store_dsn))
 
 if "__DEMO_MERCHANT_API_KEY__" in s:
   if not demo_api_key:
     raise SystemExit("demo merchant api key placeholder present but DEMO_MERCHANT_API_KEY is empty")
-  s = s.replace("__DEMO_MERCHANT_API_KEY__", demo_api_key)
+  s = s.replace("__DEMO_MERCHANT_API_KEY__", json.dumps(demo_api_key))
 
 if "__RDS_PASSWORD__" in s:
   if not rds_secret_arn:
