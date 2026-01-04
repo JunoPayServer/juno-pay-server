@@ -705,6 +705,52 @@ func (s *Store) LookupMerchantIDByAPIKey(ctx context.Context, apiKey string) (me
 	return doc.MerchantID, true, nil
 }
 
+func (s *Store) ListMerchantAPIKeys(ctx context.Context, merchantID string) ([]store.MerchantAPIKey, error) {
+	merchantID = strings.TrimSpace(merchantID)
+	if merchantID == "" {
+		return nil, domain.NewError(domain.ErrInvalidArgument, "merchant_id is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	opts := options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}, {Key: "_id", Value: -1}})
+	cur, err := s.c("api_keys").Find(ctx, bson.M{"merchant_id": merchantID}, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+
+	var out []store.MerchantAPIKey
+	for cur.Next(ctx) {
+		var doc struct {
+			KeyID      string `bson:"_id"`
+			MerchantID string `bson:"merchant_id"`
+			Label      string `bson:"label"`
+			CreatedAt  int64  `bson:"created_at"`
+			RevokedAt  *int64 `bson:"revoked_at,omitempty"`
+		}
+		if err := cur.Decode(&doc); err != nil {
+			return nil, err
+		}
+		rec := store.MerchantAPIKey{
+			KeyID:      doc.KeyID,
+			MerchantID: doc.MerchantID,
+			Label:      doc.Label,
+			CreatedAt:  time.Unix(doc.CreatedAt, 0).UTC(),
+		}
+		if doc.RevokedAt != nil {
+			t := time.Unix(*doc.RevokedAt, 0).UTC()
+			rec.RevokedAt = &t
+		}
+		out = append(out, rec)
+	}
+	if err := cur.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (s *Store) CreateInvoice(ctx context.Context, req store.InvoiceCreate) (domain.Invoice, bool, error) {
 	req.MerchantID = strings.TrimSpace(req.MerchantID)
 	req.ExternalOrderID = strings.TrimSpace(req.ExternalOrderID)

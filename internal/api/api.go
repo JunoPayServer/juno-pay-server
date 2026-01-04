@@ -990,9 +990,32 @@ func (s *Server) handleAdminGetMerchant(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	w0, walletOK, err := s.st.GetMerchantWallet(ctx, merchantID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+	keys, err := s.st.ListMerchantAPIKeys(ctx, merchantID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "db error")
+		return
+	}
+
+	out := toMerchantJSON(m)
+	if walletOK {
+		out["wallet"] = toMerchantWalletJSON(w0)
+	} else {
+		out["wallet"] = nil
+	}
+	apiKeys := make([]any, 0, len(keys))
+	for _, k := range keys {
+		apiKeys = append(apiKeys, toMerchantAPIKeyJSON(k))
+	}
+	out["api_keys"] = apiKeys
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "ok",
-		"data":   toMerchantJSON(m),
+		"data":   out,
 	})
 }
 
@@ -2011,6 +2034,20 @@ func toMerchantWalletJSON(w0 store.MerchantWallet) map[string]any {
 		"ua_hrp":      w0.UAHRP,
 		"coin_type":   w0.CoinType,
 		"created_at":  w0.CreatedAt.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func toMerchantAPIKeyJSON(k store.MerchantAPIKey) map[string]any {
+	var revokedAt any = nil
+	if k.RevokedAt != nil {
+		revokedAt = k.RevokedAt.UTC().Format(time.RFC3339Nano)
+	}
+	return map[string]any{
+		"key_id":      k.KeyID,
+		"merchant_id": k.MerchantID,
+		"label":       k.Label,
+		"created_at":  k.CreatedAt.UTC().Format(time.RFC3339Nano),
+		"revoked_at":  revokedAt,
 	}
 }
 

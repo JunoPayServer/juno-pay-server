@@ -526,6 +526,44 @@ func (s *Store) LookupMerchantIDByAPIKey(ctx context.Context, apiKey string) (me
 	return merchantID, true, nil
 }
 
+func (s *Store) ListMerchantAPIKeys(ctx context.Context, merchantID string) ([]store.MerchantAPIKey, error) {
+	merchantID = strings.TrimSpace(merchantID)
+	if merchantID == "" {
+		return nil, domain.NewError(domain.ErrInvalidArgument, "merchant_id is required")
+	}
+
+	rows, err := s.db.QueryContext(ctx, s.q(`
+		SELECT key_id, merchant_id, label, revoked_at, created_at
+		FROM api_keys
+		WHERE merchant_id = ?
+		ORDER BY created_at DESC, key_id DESC
+	`), merchantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []store.MerchantAPIKey
+	for rows.Next() {
+		var rec store.MerchantAPIKey
+		var revokedAt sql.NullInt64
+		var createdAt int64
+		if err := rows.Scan(&rec.KeyID, &rec.MerchantID, &rec.Label, &revokedAt, &createdAt); err != nil {
+			return nil, err
+		}
+		rec.CreatedAt = time.Unix(createdAt, 0).UTC()
+		if revokedAt.Valid {
+			t := time.Unix(revokedAt.Int64, 0).UTC()
+			rec.RevokedAt = &t
+		}
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (s *Store) CreateInvoice(ctx context.Context, req store.InvoiceCreate) (domain.Invoice, bool, error) {
 	req.MerchantID = strings.TrimSpace(req.MerchantID)
 	req.ExternalOrderID = strings.TrimSpace(req.ExternalOrderID)

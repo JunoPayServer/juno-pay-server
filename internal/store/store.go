@@ -27,6 +27,14 @@ type MerchantWallet struct {
 	CreatedAt time.Time
 }
 
+type MerchantAPIKey struct {
+	KeyID      string
+	MerchantID string
+	Label      string
+	CreatedAt  time.Time
+	RevokedAt  *time.Time
+}
+
 type InvoiceCreate struct {
 	MerchantID      string
 	ExternalOrderID string
@@ -131,6 +139,7 @@ type Store interface {
 	CreateMerchantAPIKey(ctx context.Context, merchantID, label string) (keyID string, apiKey string, err error)
 	RevokeMerchantAPIKey(ctx context.Context, keyID string) error
 	LookupMerchantIDByAPIKey(ctx context.Context, apiKey string) (merchantID string, ok bool, err error)
+	ListMerchantAPIKeys(ctx context.Context, merchantID string) ([]MerchantAPIKey, error)
 
 	// Invoices (idempotent by merchant_id + external_order_id)
 	CreateInvoice(ctx context.Context, req InvoiceCreate) (domain.Invoice, bool, error)

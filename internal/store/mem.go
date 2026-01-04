@@ -328,6 +328,37 @@ func (s *MemStore) LookupMerchantIDByAPIKey(_ context.Context, apiKey string) (m
 	return rec.MerchantID, true, nil
 }
 
+func (s *MemStore) ListMerchantAPIKeys(_ context.Context, merchantID string) ([]MerchantAPIKey, error) {
+	merchantID = strings.TrimSpace(merchantID)
+	if merchantID == "" {
+		return nil, domain.NewError(domain.ErrInvalidArgument, "merchant_id is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]MerchantAPIKey, 0)
+	for _, rec := range s.apiKeysByID {
+		if rec.MerchantID != merchantID {
+			continue
+		}
+		out = append(out, MerchantAPIKey{
+			KeyID:      rec.KeyID,
+			MerchantID: rec.MerchantID,
+			Label:      rec.Label,
+			CreatedAt:  rec.CreatedAt,
+			RevokedAt:  rec.RevokedAt,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].KeyID > out[j].KeyID
+		}
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	return out, nil
+}
+
 func (s *MemStore) CreateInvoice(_ context.Context, req InvoiceCreate) (domain.Invoice, bool, error) {
 	req.MerchantID = strings.TrimSpace(req.MerchantID)
 	req.ExternalOrderID = strings.TrimSpace(req.ExternalOrderID)

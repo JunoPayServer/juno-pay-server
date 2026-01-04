@@ -73,11 +73,31 @@ export type MerchantSettings = {
   };
 };
 
+export type MerchantWallet = {
+  merchant_id: string;
+  wallet_id: string;
+  ufvk: string;
+  chain: string;
+  ua_hrp: string;
+  coin_type: number;
+  created_at: string;
+};
+
+export type MerchantAPIKey = {
+  key_id: string;
+  merchant_id: string;
+  label: string;
+  created_at: string;
+  revoked_at: string | null;
+};
+
 export type Merchant = {
   merchant_id: string;
   name: string;
   status: string;
   settings: MerchantSettings;
+  wallet?: MerchantWallet | null;
+  api_keys?: MerchantAPIKey[];
   created_at: string;
   updated_at: string;
 };
@@ -234,8 +254,8 @@ export function getMerchant(merchantId: string): Promise<Merchant> {
   return fetchJSON<Merchant>(`/v1/admin/merchants/${encodeURIComponent(merchantId)}`);
 }
 
-export function setMerchantWallet(merchantId: string, wallet: { ufvk: string; chain: string; ua_hrp: string; coin_type: number; wallet_id: string }): Promise<unknown> {
-  return fetchJSON(`/v1/admin/merchants/${encodeURIComponent(merchantId)}/wallet`, {
+export function setMerchantWallet(merchantId: string, wallet: { ufvk: string; chain: string; ua_hrp: string; coin_type: number; wallet_id: string }): Promise<MerchantWallet> {
+  return fetchJSON<MerchantWallet>(`/v1/admin/merchants/${encodeURIComponent(merchantId)}/wallet`, {
     method: "POST",
     body: JSON.stringify(wallet),
   });
@@ -248,8 +268,8 @@ export function setMerchantSettings(merchantId: string, settings: MerchantSettin
   });
 }
 
-export function createAPIKey(merchantId: string, label: string): Promise<{ api_key: string; key: { key_id: string; merchant_id: string; label: string; revoked_at: string | null; created_at: string } }> {
-  return fetchJSON(`/v1/admin/merchants/${encodeURIComponent(merchantId)}/api-keys`, {
+export function createAPIKey(merchantId: string, label: string): Promise<{ api_key: string; key: MerchantAPIKey }> {
+  return fetchJSON<{ api_key: string; key: MerchantAPIKey }>(`/v1/admin/merchants/${encodeURIComponent(merchantId)}/api-keys`, {
     method: "POST",
     body: JSON.stringify({ label }),
   });
