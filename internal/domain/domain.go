@@ -120,13 +120,15 @@ type Merchant struct {
 type InvoiceStatus string
 
 const (
-	InvoiceOpen      InvoiceStatus = "open"
-	InvoicePartial   InvoiceStatus = "partial"
-	InvoicePaid      InvoiceStatus = "paid"
-	InvoiceOverpaid  InvoiceStatus = "overpaid"
-	InvoiceExpired   InvoiceStatus = "expired"
-	InvoicePaidLate  InvoiceStatus = "paid_late"
-	InvoiceCanceled  InvoiceStatus = "canceled"
+	InvoiceOpen             InvoiceStatus = "open"
+	InvoicePartialPending   InvoiceStatus = "partial_pending"
+	InvoicePending          InvoiceStatus = "pending"
+	InvoicePartialConfirmed InvoiceStatus = "partial_confirmed"
+	InvoiceConfirmed        InvoiceStatus = "confirmed"
+	InvoiceOverpaid         InvoiceStatus = "overpaid"
+	InvoiceExpired          InvoiceStatus = "expired"
+	InvoicePaidLate         InvoiceStatus = "paid_late"
+	InvoiceCanceled         InvoiceStatus = "canceled"
 )
 
 type Invoice struct {

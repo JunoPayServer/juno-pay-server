@@ -1694,9 +1694,16 @@ func (s *Server) handleAdminInvoices(w http.ResponseWriter, r *http.Request) {
 
 	merchantID := strings.TrimSpace(r.URL.Query().Get("merchant_id"))
 	externalOrderID := strings.TrimSpace(r.URL.Query().Get("external_order_id"))
-	status := domain.InvoiceStatus(strings.TrimSpace(r.URL.Query().Get("status")))
+	statusRaw := strings.TrimSpace(r.URL.Query().Get("status"))
+	status := domain.InvoiceStatus(statusRaw)
+	switch statusRaw {
+	case "paid":
+		status = domain.InvoiceConfirmed
+	case "partial":
+		status = domain.InvoicePartialConfirmed
+	}
 	switch status {
-	case "", domain.InvoiceOpen, domain.InvoicePartial, domain.InvoicePaid, domain.InvoiceOverpaid, domain.InvoiceExpired, domain.InvoicePaidLate, domain.InvoiceCanceled:
+	case "", domain.InvoiceOpen, domain.InvoicePartialPending, domain.InvoicePending, domain.InvoicePartialConfirmed, domain.InvoiceConfirmed, domain.InvoiceOverpaid, domain.InvoiceExpired, domain.InvoicePaidLate, domain.InvoiceCanceled:
 	default:
 		writeError(w, http.StatusBadRequest, "invalid_argument", "invalid status")
 		return

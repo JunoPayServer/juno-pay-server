@@ -151,7 +151,7 @@ func TestPayServer_DepositFlow_E2E(t *testing.T) {
 	mustWaitForScanEventKind(t, ctx, sc, "w1", "DepositEvent")
 	mustWaitForScanEventKind(t, ctx, sc, "w1", "DepositConfirmed")
 
-	mustWaitInvoicePaid(t, ctx, payURL, invoiceID, invoiceToken, 1_000_000)
+	mustWaitInvoiceConfirmed(t, ctx, payURL, invoiceID, invoiceToken, 1_000_000)
 }
 
 func mustClient(t *testing.T) *http.Client {
@@ -357,7 +357,7 @@ func mustCreateInvoice(t *testing.T, ctx context.Context, baseURL, apiKey string
 	return out.Data.Invoice.InvoiceID, out.Data.InvoiceToken, out.Data.Invoice.Address
 }
 
-func mustWaitInvoicePaid(t *testing.T, ctx context.Context, baseURL, invoiceID, token string, wantConfirmed int64) {
+func mustWaitInvoiceConfirmed(t *testing.T, ctx context.Context, baseURL, invoiceID, token string, wantConfirmed int64) {
 	t.Helper()
 	client := &http.Client{Timeout: 3 * time.Second}
 	deadline, ok := ctx.Deadline()
@@ -377,7 +377,7 @@ func mustWaitInvoicePaid(t *testing.T, ctx context.Context, baseURL, invoiceID, 
 			}
 			_ = json.NewDecoder(resp.Body).Decode(&out)
 			_ = resp.Body.Close()
-			if out.Status == "ok" && out.Data.Status == "paid" && out.Data.ReceivedConfirmedZat == wantConfirmed {
+			if out.Status == "ok" && out.Data.Status == "confirmed" && out.Data.ReceivedConfirmedZat == wantConfirmed {
 				return
 			}
 		} else if resp != nil {
@@ -385,7 +385,7 @@ func mustWaitInvoicePaid(t *testing.T, ctx context.Context, baseURL, invoiceID, 
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	t.Fatalf("invoice not paid: %s", invoiceID)
+	t.Fatalf("invoice not confirmed: %s", invoiceID)
 }
 
 func mustCreateWalletAndUFVK(t *testing.T, ctx context.Context, jd *containers.Junocashd) (account int, addr string, ufvk string) {

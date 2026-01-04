@@ -410,7 +410,7 @@ func TestMemStore_ListInvoices_FilterAndCursor(t *testing.T) {
 	}
 
 	// Status filter.
-	paid, _, err := st.ListInvoices(ctx, InvoiceFilter{MerchantID: m1.MerchantID, Status: domain.InvoicePaid, AfterID: 0, Limit: 10})
+	paid, _, err := st.ListInvoices(ctx, InvoiceFilter{MerchantID: m1.MerchantID, Status: domain.InvoiceConfirmed, AfterID: 0, Limit: 10})
 	if err != nil {
 		t.Fatalf("ListInvoices paid: %v", err)
 	}

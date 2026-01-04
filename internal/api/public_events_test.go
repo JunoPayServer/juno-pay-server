@@ -134,6 +134,29 @@ func TestPublicInvoice_EventsAndAccounting(t *testing.T) {
 		t.Fatalf("expected deposit.detected event")
 	}
 
+	// Invoice should show pending status immediately (do not stay "open").
+	invReq0 := httptest.NewRequest(http.MethodGet, "/v1/public/invoices/"+invoiceID+"?token="+token, nil)
+	invRec0 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(invRec0, invReq0)
+	if invRec0.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", invRec0.Code, invRec0.Body.String())
+	}
+	var invResp0 struct {
+		Data struct {
+			Status             string `json:"status"`
+			ReceivedPendingZat int64  `json:"received_zat_pending"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(invRec0.Body.Bytes(), &invResp0); err != nil {
+		t.Fatalf("unmarshal invoice: %v", err)
+	}
+	if invResp0.Data.Status != "pending" {
+		t.Fatalf("expected status pending, got %q", invResp0.Data.Status)
+	}
+	if invResp0.Data.ReceivedPendingZat != 100 {
+		t.Fatalf("expected received_zat_pending=100, got %d", invResp0.Data.ReceivedPendingZat)
+	}
+
 	// Confirm the deposit.
 	confirmPayload := types.DepositConfirmedPayload{
 		DepositEventPayload: depPayload,
@@ -167,8 +190,8 @@ func TestPublicInvoice_EventsAndAccounting(t *testing.T) {
 	if err := json.Unmarshal(invRec.Body.Bytes(), &invResp); err != nil {
 		t.Fatalf("unmarshal invoice: %v", err)
 	}
-	if invResp.Data.Status != "paid" {
-		t.Fatalf("expected status paid, got %q", invResp.Data.Status)
+	if invResp.Data.Status != "confirmed" {
+		t.Fatalf("expected status confirmed, got %q", invResp.Data.Status)
 	}
 	if invResp.Data.ReceivedConfirmedZat != 100 {
 		t.Fatalf("expected received_zat_confirmed=100, got %d", invResp.Data.ReceivedConfirmedZat)

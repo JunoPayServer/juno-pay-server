@@ -1139,7 +1139,7 @@ func (s *MemStore) recomputeInvoiceLocked(invoiceID string) {
 		switch inv.Status {
 		case domain.InvoiceExpired:
 			s.appendInvoiceEventLocked(invoiceID, domain.InvoiceEventInvoiceExpired, now, nil, nil)
-		case domain.InvoicePaid, domain.InvoicePaidLate:
+		case domain.InvoiceConfirmed, domain.InvoicePaidLate:
 			s.appendInvoiceEventLocked(invoiceID, domain.InvoiceEventInvoicePaid, now, nil, nil)
 		case domain.InvoiceOverpaid:
 			s.appendInvoiceEventLocked(invoiceID, domain.InvoiceEventInvoiceOverpaid, now, nil, nil)
@@ -1147,11 +1147,11 @@ func (s *MemStore) recomputeInvoiceLocked(invoiceID string) {
 
 		invID := invoiceID
 		switch {
-		case inv.Status == domain.InvoicePartial && inv.Policies.PartialPayment == domain.PartialPaymentReject:
+		case inv.Status == domain.InvoicePartialConfirmed && inv.Policies.PartialPayment == domain.PartialPaymentReject:
 			s.createReviewCaseLocked(inv.MerchantID, &invID, domain.ReviewPartialPayment, "partial payment requires review", "", "", 0)
 		case inv.Status == domain.InvoiceOverpaid && inv.Policies.Overpayment == domain.OverpaymentManualReview:
 			s.createReviewCaseLocked(inv.MerchantID, &invID, domain.ReviewOverpayment, "overpayment requires review", "", "", 0)
-		case inv.Status == domain.InvoicePaid || inv.Status == domain.InvoicePaidLate:
+		case inv.Status == domain.InvoiceConfirmed || inv.Status == domain.InvoicePaidLate:
 			expired := inv.ExpiresAt != nil && now.After(inv.ExpiresAt.UTC())
 			if expired && inv.ReceivedConfirmedZat == inv.AmountZat && inv.Policies.LatePayment == domain.LatePaymentManualReview {
 				s.createReviewCaseLocked(inv.MerchantID, &invID, domain.ReviewLatePayment, "late payment requires review", "", "", 0)
@@ -1162,21 +1162,26 @@ func (s *MemStore) recomputeInvoiceLocked(invoiceID string) {
 
 func computeInvoiceStatus(inv domain.Invoice, now time.Time) domain.InvoiceStatus {
 	expired := inv.ExpiresAt != nil && now.After(inv.ExpiresAt.UTC())
+	total := inv.ReceivedPendingZat + inv.ReceivedConfirmedZat
 
 	switch {
-	case inv.ReceivedConfirmedZat == 0 && expired:
+	case total == 0 && expired:
 		return domain.InvoiceExpired
-	case inv.ReceivedConfirmedZat == 0:
+	case total == 0:
 		return domain.InvoiceOpen
-	case inv.ReceivedConfirmedZat < inv.AmountZat:
-		return domain.InvoicePartial
+	case inv.ReceivedConfirmedZat > inv.AmountZat:
+		return domain.InvoiceOverpaid
 	case inv.ReceivedConfirmedZat == inv.AmountZat:
 		if expired && inv.Policies.LatePayment == domain.LatePaymentMarkPaidLate {
 			return domain.InvoicePaidLate
 		}
-		return domain.InvoicePaid
+		return domain.InvoiceConfirmed
+	case total >= inv.AmountZat:
+		return domain.InvoicePending
+	case inv.ReceivedConfirmedZat > 0:
+		return domain.InvoicePartialConfirmed
 	default:
-		return domain.InvoiceOverpaid
+		return domain.InvoicePartialPending
 	}
 }
 

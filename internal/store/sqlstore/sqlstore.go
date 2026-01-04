@@ -91,6 +91,48 @@ func (s *Store) Init(ctx context.Context) error {
 		}
 	}
 
+	// Backfill invoice statuses to match the current status model.
+	nowUnix := time.Now().UTC().Unix()
+	_, err = s.db.ExecContext(ctx, s.q(`
+		UPDATE invoices
+		SET status = CASE
+			WHEN (received_pending_zat + received_confirmed_zat) = 0
+			  AND expires_at IS NOT NULL
+			  AND expires_at < ?
+				THEN ?
+			WHEN (received_pending_zat + received_confirmed_zat) = 0
+				THEN ?
+			WHEN received_confirmed_zat > amount_zat
+				THEN ?
+			WHEN received_confirmed_zat = amount_zat
+				THEN CASE
+					WHEN expires_at IS NOT NULL
+					  AND expires_at < ?
+					  AND policy_late_payment = ?
+						THEN ?
+					ELSE ?
+				END
+			WHEN (received_pending_zat + received_confirmed_zat) >= amount_zat
+				THEN ?
+			WHEN received_confirmed_zat > 0
+				THEN ?
+			ELSE ?
+		END
+		WHERE status <> ?
+	`),
+		nowUnix, string(domain.InvoiceExpired),
+		string(domain.InvoiceOpen),
+		string(domain.InvoiceOverpaid),
+		nowUnix, string(domain.LatePaymentMarkPaidLate), string(domain.InvoicePaidLate), string(domain.InvoiceConfirmed),
+		string(domain.InvoicePending),
+		string(domain.InvoicePartialConfirmed),
+		string(domain.InvoicePartialPending),
+		string(domain.InvoiceCanceled),
+	)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -2577,7 +2619,7 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 	}
 
 	expired := invExpires.Valid && now.Unix() > invExpires.Int64
-	newStatus := computeInvoiceStatusSQL(invAmount, confirmedSum, expired, domain.LatePaymentPolicy(invLatePolicy))
+	newStatus := computeInvoiceStatusSQL(invAmount, pendingSum, confirmedSum, expired, domain.LatePaymentPolicy(invLatePolicy))
 
 	_, err = tx.ExecContext(ctx, s.q(`
 		UPDATE invoices
@@ -2597,7 +2639,7 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 			if err := s.insertInvoiceEventTx(ctx, tx, applyInvoiceID, domain.InvoiceEventInvoiceExpired, now, nil, nil); err != nil {
 				return err
 			}
-		case domain.InvoicePaid, domain.InvoicePaidLate:
+		case domain.InvoiceConfirmed, domain.InvoicePaidLate:
 			if err := s.insertInvoiceEventTx(ctx, tx, applyInvoiceID, domain.InvoiceEventInvoicePaid, now, nil, nil); err != nil {
 				return err
 			}
@@ -2609,7 +2651,7 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 
 		invID := applyInvoiceID
 		switch {
-		case newStatus == domain.InvoicePartial && domain.PartialPaymentPolicy(invPartial) == domain.PartialPaymentReject:
+		case newStatus == domain.InvoicePartialConfirmed && domain.PartialPaymentPolicy(invPartial) == domain.PartialPaymentReject:
 			reviewID, err := newID("rev")
 			if err != nil {
 				return err
@@ -2645,7 +2687,7 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 			if err != nil {
 				return err
 			}
-		case (newStatus == domain.InvoicePaid || newStatus == domain.InvoicePaidLate) &&
+		case (newStatus == domain.InvoiceConfirmed || newStatus == domain.InvoicePaidLate) &&
 			expired && confirmedSum == invAmount && domain.LatePaymentPolicy(invLatePolicy) == domain.LatePaymentManualReview:
 			reviewID, err := newID("rev")
 			if err != nil {
@@ -2670,21 +2712,26 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 	return nil
 }
 
-func computeInvoiceStatusSQL(amountZat int64, confirmedZat int64, expired bool, latePolicy domain.LatePaymentPolicy) domain.InvoiceStatus {
+func computeInvoiceStatusSQL(amountZat int64, pendingZat int64, confirmedZat int64, expired bool, latePolicy domain.LatePaymentPolicy) domain.InvoiceStatus {
+	total := pendingZat + confirmedZat
 	switch {
-	case confirmedZat == 0 && expired:
+	case total == 0 && expired:
 		return domain.InvoiceExpired
-	case confirmedZat == 0:
+	case total == 0:
 		return domain.InvoiceOpen
-	case confirmedZat < amountZat:
-		return domain.InvoicePartial
+	case confirmedZat > amountZat:
+		return domain.InvoiceOverpaid
 	case confirmedZat == amountZat:
 		if expired && latePolicy == domain.LatePaymentMarkPaidLate {
 			return domain.InvoicePaidLate
 		}
-		return domain.InvoicePaid
+		return domain.InvoiceConfirmed
+	case total >= amountZat:
+		return domain.InvoicePending
+	case confirmedZat > 0:
+		return domain.InvoicePartialConfirmed
 	default:
-		return domain.InvoiceOverpaid
+		return domain.InvoicePartialPending
 	}
 }
 

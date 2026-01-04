@@ -323,7 +323,7 @@ func TestStore_ListInvoices_FilterAndCursor(t *testing.T) {
 		t.Fatalf("expected cursor to advance")
 	}
 
-	paid, _, err := s.ListInvoices(ctx, store.InvoiceFilter{MerchantID: m.MerchantID, Status: domain.InvoicePaid, AfterID: 0, Limit: 10})
+	paid, _, err := s.ListInvoices(ctx, store.InvoiceFilter{MerchantID: m.MerchantID, Status: domain.InvoiceConfirmed, AfterID: 0, Limit: 10})
 	if err != nil {
 		t.Fatalf("ListInvoices paid: %v", err)
 	}

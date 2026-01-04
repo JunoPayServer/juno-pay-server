@@ -1441,7 +1441,7 @@ func (s *Store) applyDepositEvent(sessCtx mongo.SessionContext, ev store.ScanEve
 	}
 
 	expired := invDoc.ExpiresAt != nil && now.Unix() > *invDoc.ExpiresAt
-	newStatus := computeInvoiceStatusSQL(invDoc.AmountZat, confirmedSum, expired, domain.LatePaymentPolicy(invDoc.Policies.LatePayment))
+	newStatus := computeInvoiceStatusSQL(invDoc.AmountZat, pendingSum, confirmedSum, expired, domain.LatePaymentPolicy(invDoc.Policies.LatePayment))
 
 	_, err = s.c("invoices").UpdateOne(sessCtx, bson.M{"_id": applyInvoiceID}, bson.M{
 		"$set": bson.M{
@@ -1461,7 +1461,7 @@ func (s *Store) applyDepositEvent(sessCtx mongo.SessionContext, ev store.ScanEve
 			if err := s.insertInvoiceEvent(sessCtx, applyInvoiceID, domain.InvoiceEventInvoiceExpired, now, nil, nil); err != nil {
 				return err
 			}
-		case domain.InvoicePaid, domain.InvoicePaidLate:
+		case domain.InvoiceConfirmed, domain.InvoicePaidLate:
 			if err := s.insertInvoiceEvent(sessCtx, applyInvoiceID, domain.InvoiceEventInvoicePaid, now, nil, nil); err != nil {
 				return err
 			}
@@ -1473,7 +1473,7 @@ func (s *Store) applyDepositEvent(sessCtx mongo.SessionContext, ev store.ScanEve
 
 		invID := applyInvoiceID
 		switch {
-		case newStatus == domain.InvoicePartial && domain.PartialPaymentPolicy(invDoc.Policies.PartialPayment) == domain.PartialPaymentReject:
+		case newStatus == domain.InvoicePartialConfirmed && domain.PartialPaymentPolicy(invDoc.Policies.PartialPayment) == domain.PartialPaymentReject:
 			if err := s.createReviewCase(sessCtx, invDoc.MerchantID, &invID, domain.ReviewPartialPayment, "partial payment requires review", "", "", 0); err != nil {
 				return err
 			}
@@ -1481,7 +1481,7 @@ func (s *Store) applyDepositEvent(sessCtx mongo.SessionContext, ev store.ScanEve
 			if err := s.createReviewCase(sessCtx, invDoc.MerchantID, &invID, domain.ReviewOverpayment, "overpayment requires review", "", "", 0); err != nil {
 				return err
 			}
-		case (newStatus == domain.InvoicePaid || newStatus == domain.InvoicePaidLate) &&
+		case (newStatus == domain.InvoiceConfirmed || newStatus == domain.InvoicePaidLate) &&
 			expired && confirmedSum == invDoc.AmountZat && domain.LatePaymentPolicy(invDoc.Policies.LatePayment) == domain.LatePaymentManualReview:
 			if err := s.createReviewCase(sessCtx, invDoc.MerchantID, &invID, domain.ReviewLatePayment, "late payment requires review", "", "", 0); err != nil {
 				return err
@@ -1521,21 +1521,26 @@ func (s *Store) sumDeposits(ctx context.Context, invoiceID string, statuses []st
 	return out.Sum, nil
 }
 
-func computeInvoiceStatusSQL(amountZat int64, confirmedZat int64, expired bool, latePolicy domain.LatePaymentPolicy) domain.InvoiceStatus {
+func computeInvoiceStatusSQL(amountZat int64, pendingZat int64, confirmedZat int64, expired bool, latePolicy domain.LatePaymentPolicy) domain.InvoiceStatus {
+	total := pendingZat + confirmedZat
 	switch {
-	case confirmedZat == 0 && expired:
+	case total == 0 && expired:
 		return domain.InvoiceExpired
-	case confirmedZat == 0:
+	case total == 0:
 		return domain.InvoiceOpen
-	case confirmedZat < amountZat:
-		return domain.InvoicePartial
+	case confirmedZat > amountZat:
+		return domain.InvoiceOverpaid
 	case confirmedZat == amountZat:
 		if expired && latePolicy == domain.LatePaymentMarkPaidLate {
 			return domain.InvoicePaidLate
 		}
-		return domain.InvoicePaid
+		return domain.InvoiceConfirmed
+	case total >= amountZat:
+		return domain.InvoicePending
+	case confirmedZat > 0:
+		return domain.InvoicePartialConfirmed
 	default:
-		return domain.InvoiceOverpaid
+		return domain.InvoicePartialPending
 	}
 }
 

@@ -1125,7 +1125,7 @@ components:
 
     InvoiceStatus:
       type: string
-      enum: [open, partial, paid, overpaid, expired, paid_late, canceled]
+      enum: [open, partial_pending, pending, partial_confirmed, confirmed, overpaid, expired, paid_late, canceled]
 
     LatePaymentPolicy:
       type: string
