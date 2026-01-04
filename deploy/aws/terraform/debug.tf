@@ -18,8 +18,11 @@ if [[ -z "$OUT" || "$OUT" == "None" ]]; then
   exit 0
 fi
 
-echo "$OUT" | base64 --decode | tail -n 200 || true
+if echo "$OUT" | base64 --decode >/tmp/console.out 2>/dev/null; then
+  tail -n 200 /tmp/console.out || true
+else
+  echo "$OUT" | tail -n 200 || true
+fi
 EOT
   }
 }
-
