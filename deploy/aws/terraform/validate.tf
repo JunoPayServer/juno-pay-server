@@ -36,5 +36,20 @@ resource "terraform_data" "validate" {
       condition     = !var.enable_msk || length(var.msk_subnet_ids) >= 2
       error_message = "msk_subnet_ids must include at least 2 subnets when enable_msk=true."
     }
+
+    precondition {
+      condition     = trimspace(var.domain_name) == "" || trimspace(var.route53_zone_id) != ""
+      error_message = "route53_zone_id is required when domain_name is set."
+    }
+
+    precondition {
+      condition     = trimspace(var.route53_zone_id) == "" || trimspace(var.domain_name) != ""
+      error_message = "domain_name is required when route53_zone_id is set."
+    }
+
+    precondition {
+      condition     = trimspace(var.domain_name) == "" || trimspace(var.route53_zone_id) == "" || var.demo_port == 80
+      error_message = "demo_port must be 80 when domain_name and route53_zone_id are set (required for automatic TLS)."
+    }
   }
 }

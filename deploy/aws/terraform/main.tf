@@ -22,11 +22,22 @@ resource "aws_security_group" "host" {
   }
 
   dynamic "ingress" {
-    for_each = var.enable_demo_app ? [1] : []
+    for_each = (var.enable_demo_app || local.enable_caddy) ? [1] : []
     content {
-      description = "Demo app HTTP"
+      description = "HTTP"
       from_port   = var.demo_port
       to_port     = var.demo_port
+      protocol    = "tcp"
+      cidr_blocks = var.demo_allowed_cidrs
+    }
+  }
+
+  dynamic "ingress" {
+    for_each = local.enable_caddy ? [1] : []
+    content {
+      description = "HTTPS"
+      from_port   = 443
+      to_port     = 443
       protocol    = "tcp"
       cidr_blocks = var.demo_allowed_cidrs
     }
@@ -145,6 +156,8 @@ resource "aws_iam_instance_profile" "host" {
 }
 
 locals {
+  enable_caddy = trimspace(var.domain_name) != "" && trimspace(var.route53_zone_id) != ""
+
   compose_yml = templatefile("${path.module}/templates/docker-compose.yml.tftpl", {
     name_prefix          = var.name_prefix
     image_junocashd      = var.image_junocashd
@@ -154,6 +167,7 @@ locals {
     image_demo_app       = var.enable_demo_app ? var.image_demo_app : ""
     demo_port            = var.demo_port
     demo_api_key_enabled = var.demo_merchant_api_key_ssm_param != ""
+    enable_caddy         = local.enable_caddy
     pay_server_port      = var.pay_server_port
     juno_chain           = var.juno_chain
     juno_scan_ua_hrp     = var.juno_scan_ua_hrp
@@ -204,6 +218,9 @@ resource "aws_instance" "host" {
     token_key_ssm_param             = var.token_key_ssm_param
     pay_store_dsn_ssm_param         = var.pay_store_dsn_ssm_param
     demo_merchant_api_key_ssm_param = var.demo_merchant_api_key_ssm_param
+    domain_name                     = var.domain_name
+    enable_caddy                    = local.enable_caddy
+    enable_demo_app                 = var.enable_demo_app
     data_volume_id                  = try(aws_ebs_volume.data[0].id, "")
     rds_secret_arn                  = var.enable_rds_postgres ? aws_db_instance.junoscan[0].master_user_secret[0].secret_arn : ""
     docker_compose_yml              = local.compose_yml

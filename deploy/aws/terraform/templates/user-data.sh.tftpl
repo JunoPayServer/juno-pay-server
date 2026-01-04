@@ -80,6 +80,9 @@ if [[ -n "$DATA_VOLUME_ID" ]]; then
 fi
 
 mkdir -p "$DATA_DIR/junocashd" "$DATA_DIR/juno-scan" "$DATA_DIR/juno-pay-server"
+%{ if enable_caddy ~}
+mkdir -p "$DATA_DIR/caddy/data" "$DATA_DIR/caddy/config"
+%{ endif ~}
 chown -R 10001:65534 "$DATA_DIR/juno-pay-server" || true
 
 ADMIN_PASSWORD="$(aws ssm get-parameter --with-decryption --region "$REGION" --name "${admin_password_ssm_param}" --query 'Parameter.Value' --output text)"
@@ -97,6 +100,29 @@ export ADMIN_PASSWORD TOKEN_KEY_HEX PAY_STORE_DSN DEMO_MERCHANT_API_KEY REGION R
 cat > docker-compose.yml <<'EOF'
 ${docker_compose_yml}
 EOF
+
+%{ if enable_caddy ~}
+cat > Caddyfile <<'EOF'
+${domain_name}, www.${domain_name} {
+  encode zstd gzip
+
+  @backend path /admin* /v1/*
+  handle @backend {
+    reverse_proxy juno-pay-server:8080
+  }
+
+%{ if enable_demo_app ~}
+  handle {
+    reverse_proxy demo-app:3000
+  }
+%{ else ~}
+  handle {
+    respond "not found" 404
+  }
+%{ endif ~}
+}
+EOF
+%{ endif ~}
 
 python3 - <<'PY'
 import json

@@ -4,13 +4,13 @@ output "instance_public_ip" {
 }
 
 output "admin_url" {
-  value       = "http://${aws_eip.host.public_ip}:${var.pay_server_port}/admin/"
-  description = "Admin dashboard URL (no TLS)."
+  value       = local.enable_caddy ? "https://${var.domain_name}/admin/" : "http://${aws_eip.host.public_ip}:${var.pay_server_port}/admin/"
+  description = "Admin dashboard URL."
 }
 
 output "demo_url" {
-  value       = var.enable_demo_app ? "http://${aws_eip.host.public_ip}:${var.demo_port}/" : null
-  description = "Demo app URL (no TLS, if enabled)."
+  value       = var.enable_demo_app ? (local.enable_caddy ? "https://${var.domain_name}/" : "http://${aws_eip.host.public_ip}:${var.demo_port}/") : null
+  description = "Demo app URL (if enabled)."
 }
 
 output "vpc_id" {

@@ -99,6 +99,28 @@ services:
 %{ if demo_api_key_enabled ~}
       JUNO_PAY_MERCHANT_API_KEY: __DEMO_MERCHANT_API_KEY__
 %{ endif ~}
+%{ if !enable_caddy ~}
     ports:
       - "${demo_port}:3000"
+%{ endif ~}
+%{ endif ~}
+
+%{ if enable_caddy ~}
+  caddy:
+    image: caddy:2.7.6
+    restart: unless-stopped
+    depends_on:
+      juno-pay-server:
+        condition: service_started
+%{ if enable_demo_app ~}
+      demo-app:
+        condition: service_started
+%{ endif ~}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /opt/${name_prefix}/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /opt/${name_prefix}/data/caddy/data:/data
+      - /opt/${name_prefix}/data/caddy/config:/config
 %{ endif ~}

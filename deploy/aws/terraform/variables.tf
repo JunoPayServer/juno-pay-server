@@ -141,6 +141,18 @@ variable "demo_allowed_cidrs" {
   default     = ["0.0.0.0/0"]
 }
 
+variable "domain_name" {
+  type        = string
+  description = "Optional public domain name (apex) to serve over HTTPS (e.g. junopayserver.com). When set, the stack provisions DNS records and enables a Caddy reverse proxy with automatic TLS."
+  default     = "junopayserver.com"
+}
+
+variable "route53_zone_id" {
+  type        = string
+  description = "Route53 hosted zone ID where domain_name records will be created (public hosted zone). Required when domain_name is set."
+  default     = "Z02178061MTBYJ0GT7Q53"
+}
+
 variable "image_juno_pay_server" {
   type        = string
   description = "Docker image URI for juno-pay-server (recommended: ECR)."

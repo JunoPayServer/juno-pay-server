@@ -62,6 +62,16 @@ By default this stack also runs the demo checkout app (Next.js) on `demo_port` (
 
 To make invoice creation work, set `demo_merchant_api_key_ssm_param` to an SSM SecureString containing a merchant API key.
 
+## HTTPS + custom domain (Caddy + Let's Encrypt)
+
+If `domain_name` and `route53_zone_id` are set, this stack:
+
+- creates Route53 `A` records for `domain_name` and `www.domain_name` pointing at the instance EIP
+- runs a Caddy reverse proxy on ports `80/443` with automatic TLS
+- routes `/admin*` and `/v1/*` to `juno-pay-server` and everything else to the demo app
+
+Make sure your domain registrar is using the Route53 name servers for the hosted zone.
+
 ## Optional: RDS (Postgres) for `juno-scan`
 
 Set:
