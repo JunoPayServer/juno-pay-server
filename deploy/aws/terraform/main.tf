@@ -227,7 +227,7 @@ resource "aws_instance" "host" {
     volume_type = "gp3"
   }
 
-  user_data = templatefile("${path.module}/templates/user-data.sh.tftpl", {
+  user_data_base64 = base64gzip(templatefile("${path.module}/templates/user-data.sh.tftpl", {
     name_prefix                     = var.name_prefix
     aws_region                      = var.aws_region
     pay_server_port                 = var.pay_server_port
@@ -241,7 +241,7 @@ resource "aws_instance" "host" {
     data_volume_id                  = try(aws_ebs_volume.data[0].id, "")
     rds_secret_arn                  = var.enable_rds_postgres ? aws_db_instance.junoscan[0].master_user_secret[0].secret_arn : ""
     docker_compose_yml              = local.compose_yml
-  })
+  }))
   user_data_replace_on_change = true
 
   tags = {
