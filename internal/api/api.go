@@ -138,6 +138,10 @@ func WithAdminUI(dir string) Option {
 	return func(s *Server) error {
 		dir = strings.TrimSpace(dir)
 		if dir == "" {
+			if _, ok := embeddedAdminUI(); !ok {
+				return nil
+			}
+			s.adminUI = newAdminUIHandler("")
 			return nil
 		}
 		info, err := os.Stat(dir)

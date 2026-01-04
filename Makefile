@@ -31,7 +31,7 @@ rust-test:
 	cargo test --manifest-path $(RUST_MANIFEST)
 
 test-unit:
-	CGO_ENABLED=0 go test $(TESTFLAGS) ./...
+	CGO_ENABLED=0 go test $(TESTFLAGS) -tags=adminui ./...
 
 test-integration:
 	$(MAKE) rust-build
