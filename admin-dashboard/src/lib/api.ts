@@ -178,7 +178,7 @@ export type StatusSnapshot = {
   chain: {
     best_height: number;
     best_hash: string;
-    uptime_seconds: number;
+    uptime_seconds: number | null;
   };
   scanner: {
     connected: boolean;
@@ -337,13 +337,14 @@ export function createRefund(req: { merchant_id: string; invoice_id?: string; ex
   return fetchJSON<Refund>("/v1/admin/refunds", { method: "POST", body: JSON.stringify(req) });
 }
 
-export function listOutboundEvents(params?: { merchant_id?: string; cursor?: string; limit?: string }): Promise<{ events: CloudEvent[]; next_cursor: string }> {
+export async function listOutboundEvents(params?: { merchant_id?: string; cursor?: string; limit?: string }): Promise<{ events: CloudEvent[]; next_cursor: string }> {
   const p = new URLSearchParams();
   if (params?.merchant_id) p.set("merchant_id", params.merchant_id);
   if (params?.cursor) p.set("cursor", params.cursor);
   if (params?.limit) p.set("limit", params.limit);
   const q = p.toString();
-  return fetchJSON<{ events: CloudEvent[]; next_cursor: string }>(`/v1/admin/events${q ? `?${q}` : ""}`);
+  const out = await fetchJSON<{ events: CloudEvent[] | null; next_cursor: string }>(`/v1/admin/events${q ? `?${q}` : ""}`);
+  return { ...out, events: Array.isArray(out.events) ? out.events : [] };
 }
 
 export function listEventDeliveries(params?: { merchant_id?: string; sink_id?: string; status?: string; limit?: string }): Promise<EventDelivery[]> {

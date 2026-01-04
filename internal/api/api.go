@@ -1478,6 +1478,9 @@ func (s *Server) handleAdminEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", "db error")
 		return
 	}
+	if events == nil {
+		events = []domain.CloudEvent{}
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "ok",

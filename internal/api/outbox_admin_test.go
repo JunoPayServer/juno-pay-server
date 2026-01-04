@@ -34,6 +34,59 @@ func adminLogin(t *testing.T, s *Server, password string) *http.Cookie {
 	return cs[0]
 }
 
+type nilOutboundEventsStore struct {
+	store.Store
+}
+
+func (s nilOutboundEventsStore) ListOutboundEvents(ctx context.Context, merchantID string, afterID int64, limit int) ([]domain.CloudEvent, int64, error) {
+	_, next, err := s.Store.ListOutboundEvents(ctx, merchantID, afterID, limit)
+	return nil, next, err
+}
+
+func TestAdmin_OutboundEvents_EmptyIsJSONArray(t *testing.T) {
+	base := store.NewMem()
+	ctx := context.Background()
+
+	m, err := base.CreateMerchant(ctx, "acme", defaultMerchantSettings())
+	if err != nil {
+		t.Fatalf("CreateMerchant: %v", err)
+	}
+
+	now := time.Date(2025, 12, 30, 0, 0, 0, 0, time.UTC)
+	s, err := New(nilOutboundEventsStore{Store: base}, fakeDeriver{}, fixedTip{height: 100, hash: "h100"}, fixedClock{t: now}, fixedTokenGen{token: "tok"}, WithAdminPassword("pw"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	adminCookie := adminLogin(t, s, "pw")
+
+	evReq := httptest.NewRequest(http.MethodGet, "/v1/admin/events?merchant_id="+m.MerchantID, nil)
+	evReq.AddCookie(adminCookie)
+	evRec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(evRec, evReq)
+	if evRec.Code != http.StatusOK {
+		t.Fatalf("list events: expected 200, got %d: %s", evRec.Code, evRec.Body.String())
+	}
+
+	var evResp struct {
+		Status string `json:"status"`
+		Data   struct {
+			Events []domain.CloudEvent `json:"events"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(evRec.Body.Bytes(), &evResp); err != nil {
+		t.Fatalf("unmarshal events: %v", err)
+	}
+	if evResp.Status != "ok" {
+		t.Fatalf("events: expected status ok")
+	}
+	if evResp.Data.Events == nil {
+		t.Fatalf("events: expected JSON array, got null")
+	}
+	if len(evResp.Data.Events) != 0 {
+		t.Fatalf("events: expected 0 events, got %d", len(evResp.Data.Events))
+	}
+}
+
 func TestAdmin_EventSinksAndOutboundEvents(t *testing.T) {
 	st := store.NewMem()
 	ctx := context.Background()

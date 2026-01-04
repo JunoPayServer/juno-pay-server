@@ -37,7 +37,7 @@ export default function StatusPage() {
         <div className="mt-3">
           <Row label="Best Height" value={status.chain.best_height} />
           <Row label="Best Hash" value={<span className="font-mono text-xs">{status.chain.best_hash}</span>} />
-          <Row label="Uptime (s)" value={status.chain.uptime_seconds} />
+          <Row label="Uptime (s)" value={status.chain.uptime_seconds ?? "—"} />
         </div>
       </section>
 
@@ -67,4 +67,3 @@ export default function StatusPage() {
     </div>
   );
 }
-
