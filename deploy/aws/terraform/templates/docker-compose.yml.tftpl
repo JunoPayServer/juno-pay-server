@@ -20,7 +20,7 @@ services:
       - -rpcuser=rpcuser
       - -rpcpassword=rpcpass
     volumes:
-      - junocashd-data:/data
+      - /opt/${name_prefix}/data/junocashd:/data
     healthcheck:
       test: ["CMD", "juno-cli", "getblockcount"]
       interval: 5s
@@ -48,7 +48,7 @@ services:
       JUNO_SCAN_DB_PATH: /data/db
 %{ endif ~}
     volumes:
-      - junoscan-data:/data
+      - /opt/${name_prefix}/data/juno-scan:/data
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/v1/health"]
       interval: 5s
@@ -85,7 +85,7 @@ services:
     ports:
       - "${pay_server_port}:8080"
     volumes:
-      - payserver-data:/data
+      - /opt/${name_prefix}/data/juno-pay-server:/data
 
 %{ if enable_demo_app ~}
   demo-app:
@@ -102,8 +102,3 @@ services:
     ports:
       - "${demo_port}:3000"
 %{ endif ~}
-
-volumes:
-  junocashd-data:
-  junoscan-data:
-  payserver-data:

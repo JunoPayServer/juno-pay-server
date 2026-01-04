@@ -70,6 +70,12 @@ variable "root_volume_gb" {
   default     = 200
 }
 
+variable "data_volume_gb" {
+  type        = number
+  description = "Optional persistent EBS data volume size (GiB). Set to 0 to disable."
+  default     = 200
+}
+
 variable "pay_server_port" {
   type        = number
   description = "Host port to expose juno-pay-server on."

@@ -4,6 +4,8 @@ set -euo pipefail
 NAME_PREFIX="${name_prefix}"
 REGION="${aws_region}"
 ROOT="/opt/${name_prefix}"
+DATA_DIR="$ROOT/data"
+DATA_VOLUME_ID="${data_volume_id}"
 RDS_SECRET_ARN="${rds_secret_arn}"
 PAY_STORE_DSN_PARAM="${pay_store_dsn_ssm_param}"
 DEMO_MERCHANT_API_KEY_PARAM="${demo_merchant_api_key_ssm_param}"
@@ -12,7 +14,7 @@ mkdir -p "$ROOT"
 cd "$ROOT"
 
 dnf update -y
-dnf install -y docker awscli python3
+dnf install -y docker awscli python3 e2fsprogs
 systemctl enable docker
 systemctl start docker
 
@@ -29,6 +31,40 @@ fi
 ACCOUNT_ID="$(aws sts get-caller-identity --region "$REGION" --query Account --output text)"
 ECR_REGISTRY="$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com"
 aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+mkdir -p "$DATA_DIR"
+if [[ -n "$DATA_VOLUME_ID" ]]; then
+  DEV_BY_ID="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_$DATA_VOLUME_ID"
+  DEV=""
+  for _ in {1..90}; do
+    if [[ -b "$DEV_BY_ID" ]]; then
+      DEV="$DEV_BY_ID"
+      break
+    fi
+    if [[ -b "/dev/xvdf" ]]; then
+      DEV="/dev/xvdf"
+      break
+    fi
+    sleep 2
+  done
+  if [[ -z "$DEV" ]]; then
+    echo "data volume device not found for $DATA_VOLUME_ID" >&2
+    ls -l /dev/disk/by-id || true
+    ls -l /dev | head || true
+    exit 1
+  fi
+  if ! blkid "$DEV" >/dev/null 2>&1; then
+    mkfs.ext4 -F "$DEV"
+  fi
+  UUID="$(blkid -o value -s UUID "$DEV")"
+  if ! grep -q "UUID=$UUID" /etc/fstab; then
+    echo "UUID=$UUID $DATA_DIR ext4 defaults,nofail 0 2" >> /etc/fstab
+  fi
+  mount "$DATA_DIR"
+fi
+
+mkdir -p "$DATA_DIR/junocashd" "$DATA_DIR/juno-scan" "$DATA_DIR/juno-pay-server"
+chown -R 10001:65534 "$DATA_DIR/juno-pay-server" || true
 
 ADMIN_PASSWORD="$(aws ssm get-parameter --with-decryption --region "$REGION" --name "${admin_password_ssm_param}" --query 'Parameter.Value' --output text)"
 TOKEN_KEY_HEX="$(aws ssm get-parameter --with-decryption --region "$REGION" --name "${token_key_ssm_param}" --query 'Parameter.Value' --output text)"

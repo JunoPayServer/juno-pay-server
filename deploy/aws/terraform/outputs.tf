@@ -1,15 +1,15 @@
 output "instance_public_ip" {
-  value       = aws_instance.host.public_ip
+  value       = aws_eip.host.public_ip
   description = "Public IP of the docker host."
 }
 
 output "admin_url" {
-  value       = "http://${aws_instance.host.public_ip}:${var.pay_server_port}/admin/"
+  value       = "http://${aws_eip.host.public_ip}:${var.pay_server_port}/admin/"
   description = "Admin dashboard URL (no TLS)."
 }
 
 output "demo_url" {
-  value       = var.enable_demo_app ? "http://${aws_instance.host.public_ip}:${var.demo_port}/" : null
+  value       = var.enable_demo_app ? "http://${aws_eip.host.public_ip}:${var.demo_port}/" : null
   description = "Demo app URL (no TLS, if enabled)."
 }
 

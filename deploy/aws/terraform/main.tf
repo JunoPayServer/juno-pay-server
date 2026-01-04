@@ -146,6 +146,7 @@ resource "aws_iam_instance_profile" "host" {
 
 locals {
   compose_yml = templatefile("${path.module}/templates/docker-compose.yml.tftpl", {
+    name_prefix          = var.name_prefix
     image_junocashd      = var.image_junocashd
     image_juno_scan      = var.image_juno_scan
     image_juno_pay       = var.image_juno_pay_server
@@ -167,6 +168,18 @@ locals {
     rds_username         = var.enable_rds_postgres ? aws_db_instance.junoscan[0].username : ""
     rds_secret_arn       = var.enable_rds_postgres ? aws_db_instance.junoscan[0].master_user_secret[0].secret_arn : ""
   })
+}
+
+resource "aws_ebs_volume" "data" {
+  count             = var.data_volume_gb > 0 ? 1 : 0
+  availability_zone = local.effective_az
+  size              = var.data_volume_gb
+  type              = "gp3"
+  encrypted         = true
+
+  tags = {
+    Name = "${var.name_prefix}-data"
+  }
 }
 
 resource "aws_instance" "host" {
@@ -191,6 +204,7 @@ resource "aws_instance" "host" {
     token_key_ssm_param             = var.token_key_ssm_param
     pay_store_dsn_ssm_param         = var.pay_store_dsn_ssm_param
     demo_merchant_api_key_ssm_param = var.demo_merchant_api_key_ssm_param
+    data_volume_id                  = try(aws_ebs_volume.data[0].id, "")
     rds_secret_arn                  = var.enable_rds_postgres ? aws_db_instance.junoscan[0].master_user_secret[0].secret_arn : ""
     docker_compose_yml              = local.compose_yml
   })
@@ -199,6 +213,26 @@ resource "aws_instance" "host" {
   tags = {
     Name = "${var.name_prefix}-host"
   }
+}
+
+resource "aws_volume_attachment" "data" {
+  count       = var.data_volume_gb > 0 ? 1 : 0
+  device_name = "/dev/sdf"
+  volume_id   = aws_ebs_volume.data[0].id
+  instance_id = aws_instance.host.id
+}
+
+resource "aws_eip" "host" {
+  domain = "vpc"
+
+  tags = {
+    Name = "${var.name_prefix}-eip"
+  }
+}
+
+resource "aws_eip_association" "host" {
+  allocation_id = aws_eip.host.id
+  instance_id   = aws_instance.host.id
 }
 
 resource "aws_security_group" "rds" {

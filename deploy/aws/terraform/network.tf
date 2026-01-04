@@ -63,5 +63,10 @@ resource "aws_route_table_association" "public" {
 locals {
   effective_vpc_id    = var.create_network ? aws_vpc.main[0].id : var.vpc_id
   effective_subnet_id = var.create_network ? aws_subnet.public[0].id : var.subnet_id
+  effective_az        = var.create_network ? local.az : data.aws_subnet.existing[0].availability_zone
 }
 
+data "aws_subnet" "existing" {
+  count = var.create_network ? 0 : 1
+  id    = var.subnet_id
+}
