@@ -30,7 +30,17 @@ fi
 
 ACCOUNT_ID="$(aws sts get-caller-identity --region "$REGION" --query Account --output text)"
 ECR_REGISTRY="$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com"
-aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+for i in {1..10}; do
+  if aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"; then
+    break
+  fi
+  if [[ "$i" == "10" ]]; then
+    echo "ECR login failed after retries" >&2
+    exit 1
+  fi
+  echo "ECR login failed (attempt $i/10); retrying..." >&2
+  sleep $((i * 2))
+done
 
 mkdir -p "$DATA_DIR"
 if [[ -n "$DATA_VOLUME_ID" ]]; then
@@ -147,6 +157,17 @@ with open(compose_path, "w", encoding="utf-8") as f:
   f.write(s)
 PY
 
-docker compose up -d
+for i in {1..10}; do
+  if docker compose up -d; then
+    break
+  fi
+  if [[ "$i" == "10" ]]; then
+    echo "docker compose up failed after retries" >&2
+    docker compose ps || true
+    exit 1
+  fi
+  echo "docker compose up failed (attempt $i/10); retrying..." >&2
+  sleep $((i * 2))
+done
 
 echo "juno-pay-server started"
