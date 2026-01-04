@@ -11,6 +11,21 @@ function formatJUNO(zat: number): string {
   return frac ? `${whole}.${frac}` : String(whole);
 }
 
+function uuid(): string {
+  const cryptoObj: Crypto | undefined = typeof crypto === "undefined" ? undefined : crypto;
+  if (cryptoObj?.randomUUID) {
+    return cryptoObj.randomUUID();
+  }
+  if (cryptoObj?.getRandomValues) {
+    const b = cryptoObj.getRandomValues(new Uint8Array(16));
+    b[6] = (b[6] & 0x0f) | 0x40; // v4
+    b[8] = (b[8] & 0x3f) | 0x80; // variant
+    const hex = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+  return `demo-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`;
+}
+
 export default function HomePage() {
   const [user, setUser] = useState<DemoUser | null>(null);
   const [orders, setOrders] = useState<DemoOrder[]>([]);
@@ -69,7 +84,7 @@ export default function HomePage() {
               e.preventDefault();
               const v = email.trim();
               if (!v) return;
-              const u: DemoUser = { user_id: crypto.randomUUID(), email: v };
+              const u: DemoUser = { user_id: uuid(), email: v };
               saveUser(u);
               setUser(u);
             }}
@@ -125,7 +140,7 @@ export default function HomePage() {
                 setError(null);
                 setBuying(true);
                 try {
-                  const orderID = crypto.randomUUID();
+                  const orderID = uuid();
                   const externalOrderID = `demo-air:${user.user_id}:${orderID}`;
                   const out = await createAirInvoice({ external_order_id: externalOrderID, demo_user_id: user.user_id, email: user.email });
 
@@ -219,4 +234,3 @@ export default function HomePage() {
     </div>
   );
 }
-
