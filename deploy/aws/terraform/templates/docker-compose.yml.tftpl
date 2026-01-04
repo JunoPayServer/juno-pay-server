@@ -112,10 +112,6 @@ services:
     depends_on:
       juno-pay-server:
         condition: service_started
-%{ if enable_demo_app ~}
-      demo-app:
-        condition: service_started
-%{ endif ~}
     ports:
       - "80:80"
       - "443:443"

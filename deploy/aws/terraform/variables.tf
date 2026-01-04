@@ -177,7 +177,7 @@ variable "image_demo_app" {
 variable "demo_merchant_api_key_ssm_param" {
   type        = string
   description = "Optional SSM parameter containing JUNO_PAY_MERCHANT_API_KEY for the demo app."
-  default     = ""
+  default     = "/juno-pay/demo_merchant_api_key"
 }
 
 variable "juno_chain" {

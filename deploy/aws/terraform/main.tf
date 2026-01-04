@@ -123,9 +123,20 @@ data "aws_iam_policy_document" "host_inline" {
     }
   }
 
+  dynamic "statement" {
+    for_each = var.demo_merchant_api_key_ssm_param != "" ? [1] : []
+    content {
+      sid     = "WriteDemoMerchantAPIKey"
+      actions = ["ssm:PutParameter"]
+      resources = [
+        "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${var.demo_merchant_api_key_ssm_param}",
+      ]
+    }
+  }
+
   statement {
     sid       = "DecryptSSMDefaultKey"
-    actions   = ["kms:Decrypt"]
+    actions   = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey"]
     resources = ["*"]
     condition {
       test     = "StringEquals"
