@@ -21,7 +21,7 @@ if ! docker compose version >/dev/null 2>&1; then
   DEST="/usr/local/lib/docker/cli-plugins"
   mkdir -p "$DEST"
   curl -fsSLo "$DEST/docker-compose" \
-    "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-x86_64"
+    "https://github.com/docker/compose/releases/download/$${COMPOSE_VERSION}/docker-compose-linux-x86_64"
   chmod +x "$DEST/docker-compose"
   docker compose version
 fi
