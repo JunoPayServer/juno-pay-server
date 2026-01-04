@@ -10,6 +10,17 @@ type OkBody<T> = {
   data: T;
 };
 
+export type ActionResult<T> =
+  | {
+      ok: true;
+      data: T;
+    }
+  | {
+      ok: false;
+      error: string;
+      code?: string;
+    };
+
 export type Invoice = {
   invoice_id: string;
   merchant_id: string;
@@ -52,20 +63,14 @@ export type InvoiceEventsPage = {
   next_cursor: string;
 };
 
-function baseURL(): string {
+function baseURL(): string | null {
   const v = (process.env.JUNO_PAY_BASE_URL ?? "").trim();
-  if (!v) {
-    throw new Error("JUNO_PAY_BASE_URL is not set");
-  }
-  return v.replace(/\/+$/, "");
+  return v ? v.replace(/\/+$/, "") : null;
 }
 
-function merchantAPIKey(): string {
+function merchantAPIKey(): string | null {
   const v = (process.env.JUNO_PAY_MERCHANT_API_KEY ?? "").trim();
-  if (!v) {
-    throw new Error("JUNO_PAY_MERCHANT_API_KEY is not set");
-  }
-  return v;
+  return v ? v : null;
 }
 
 async function parseJSONSafe(res: Response): Promise<unknown | undefined> {
@@ -74,9 +79,18 @@ async function parseJSONSafe(res: Response): Promise<unknown | undefined> {
   return JSON.parse(text);
 }
 
-async function fetchOK<T>(path: string, init?: RequestInit): Promise<T> {
-  const url = `${baseURL()}${path}`;
-  const res = await fetch(url, { ...init, cache: "no-store" });
+async function fetchAPI<T>(path: string, init?: RequestInit): Promise<ActionResult<T>> {
+  const base = baseURL();
+  if (!base) {
+    return { ok: false, code: "config", error: "JUNO_PAY_BASE_URL is not set" };
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(`${base}${path}`, { ...init, cache: "no-store" });
+  } catch (e) {
+    return { ok: false, code: "network_error", error: e instanceof Error ? e.message : "network error" };
+  }
 
   let body: unknown = undefined;
   try {
@@ -88,22 +102,28 @@ async function fetchOK<T>(path: string, init?: RequestInit): Promise<T> {
   if (!res.ok) {
     const b = body as Partial<ErrorBody> | undefined;
     const msg = b?.error?.message ?? `HTTP ${res.status}`;
-    throw new Error(msg);
+    return { ok: false, code: b?.error?.code, error: msg };
   }
 
   const ok = body as OkBody<T>;
   if (!ok || ok.status !== "ok") {
-    throw new Error("invalid response");
+    return { ok: false, code: "invalid_response", error: "invalid response" };
   }
-  return ok.data;
+
+  return { ok: true, data: ok.data };
 }
 
-export async function createAirInvoice(input: { external_order_id: string; demo_user_id: string; email?: string }): Promise<PublicInvoice> {
+export async function createAirInvoice(input: { external_order_id: string; demo_user_id: string; email?: string }): Promise<ActionResult<PublicInvoice>> {
+  const key = merchantAPIKey();
+  if (!key) {
+    return { ok: false, code: "config", error: "Demo is not configured yet (missing merchant API key). Try again in a minute." };
+  }
+
   const amountZat = 100_000_000; // 1 JUNO
-  return fetchOK<PublicInvoice>("/v1/invoices", {
+  return fetchAPI<PublicInvoice>("/v1/invoices", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${merchantAPIKey()}`,
+      Authorization: `Bearer ${key}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
@@ -118,20 +138,19 @@ export async function createAirInvoice(input: { external_order_id: string; demo_
   });
 }
 
-export async function getPublicInvoice(input: { invoice_id: string; invoice_token: string }): Promise<Invoice> {
+export async function getPublicInvoice(input: { invoice_id: string; invoice_token: string }): Promise<ActionResult<Invoice>> {
   const q = new URLSearchParams({ token: input.invoice_token });
-  return fetchOK<Invoice>(`/v1/public/invoices/${encodeURIComponent(input.invoice_id)}?${q.toString()}`, { method: "GET" });
+  return fetchAPI<Invoice>(`/v1/public/invoices/${encodeURIComponent(input.invoice_id)}?${q.toString()}`, { method: "GET" });
 }
 
 export async function listPublicInvoiceEvents(input: {
   invoice_id: string;
   invoice_token: string;
   cursor?: string;
-}): Promise<InvoiceEventsPage> {
+}): Promise<ActionResult<InvoiceEventsPage>> {
   const q = new URLSearchParams({ token: input.invoice_token });
   if (input.cursor && input.cursor.trim() !== "") {
     q.set("cursor", input.cursor.trim());
   }
-  return fetchOK<InvoiceEventsPage>(`/v1/public/invoices/${encodeURIComponent(input.invoice_id)}/events?${q.toString()}`, { method: "GET" });
+  return fetchAPI<InvoiceEventsPage>(`/v1/public/invoices/${encodeURIComponent(input.invoice_id)}/events?${q.toString()}`, { method: "GET" });
 }
-

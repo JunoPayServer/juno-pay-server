@@ -49,7 +49,11 @@ export default function OrdersPage() {
     try {
       const next: DemoOrder[] = [];
       for (const o of orders) {
-        const inv = await getPublicInvoice({ invoice_id: o.invoice_id, invoice_token: o.invoice_token });
+        const invRes = await getPublicInvoice({ invoice_id: o.invoice_id, invoice_token: o.invoice_token });
+        if (!invRes.ok) {
+          throw new Error(invRes.error);
+        }
+        const inv = invRes.data;
         next.push({
           ...o,
           status: inv.status,
@@ -71,11 +75,16 @@ export default function OrdersPage() {
     setError(null);
     setLoadingEvents(true);
     try {
-      const out = await listPublicInvoiceEvents({
+      const outRes = await listPublicInvoiceEvents({
         invoice_id: o.invoice_id,
         invoice_token: o.invoice_token,
         cursor: eventsCursor,
       });
+      if (!outRes.ok) {
+        throw new Error(outRes.error);
+      }
+
+      const out = outRes.data;
       if (out.events.length) {
         setEvents((prev) => [...prev, ...out.events]);
         const nextCursor = out.next_cursor === "0" ? eventsCursor : out.next_cursor;

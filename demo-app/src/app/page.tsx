@@ -4,26 +4,12 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { createAirInvoice, getPublicInvoice } from "@/app/actions";
 import { clearUser, loadOrders, loadUser, saveOrders, saveUser, type DemoOrder, type DemoUser } from "@/lib/storage";
+import { uuidv4 } from "@/lib/uuid";
 
 function formatJUNO(zat: number): string {
   const whole = Math.floor(zat / 100_000_000);
   const frac = String(zat % 100_000_000).padStart(8, "0").replace(/0+$/, "");
   return frac ? `${whole}.${frac}` : String(whole);
-}
-
-function uuid(): string {
-  const cryptoObj: Crypto | undefined = typeof crypto === "undefined" ? undefined : crypto;
-  if (cryptoObj?.randomUUID) {
-    return cryptoObj.randomUUID();
-  }
-  if (cryptoObj?.getRandomValues) {
-    const b = cryptoObj.getRandomValues(new Uint8Array(16));
-    b[6] = (b[6] & 0x0f) | 0x40; // v4
-    b[8] = (b[8] & 0x3f) | 0x80; // variant
-    const hex = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
-    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-  }
-  return `demo-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`;
 }
 
 export default function HomePage() {
@@ -43,7 +29,11 @@ export default function HomePage() {
   const lastOrder = useMemo(() => orders[0] ?? null, [orders]);
 
   async function refreshOne(o: DemoOrder) {
-    const inv = await getPublicInvoice({ invoice_id: o.invoice_id, invoice_token: o.invoice_token });
+    const invRes = await getPublicInvoice({ invoice_id: o.invoice_id, invoice_token: o.invoice_token });
+    if (!invRes.ok) {
+      throw new Error(invRes.error);
+    }
+    const inv = invRes.data;
     return {
       ...o,
       status: inv.status,
@@ -74,9 +64,27 @@ export default function HomePage() {
         <div className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">{error}</div>
       ) : null}
 
+      <section className="mt-8 rounded-lg border border-zinc-200 bg-white p-6">
+        <h1 className="text-xl font-semibold tracking-tight">Juno Pay Server</h1>
+        <p className="mt-2 text-sm text-zinc-600">
+          A self-hosted payment server for the Juno network. Create invoices, track deposits, and (optionally) deliver events to webhooks.
+        </p>
+        <div className="mt-4 flex flex-wrap items-center gap-3 text-sm">
+          <Link className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 font-medium text-zinc-950 hover:bg-zinc-50" href="https://github.com/Abdullah1738/juno-pay-server" target="_blank" rel="noreferrer">
+            GitHub →
+          </Link>
+          <Link className="text-zinc-700 hover:text-zinc-950" href="#demo">
+            See demo ↓
+          </Link>
+          <Link className="text-zinc-700 hover:text-zinc-950" href="/admin/">
+            Admin →
+          </Link>
+        </div>
+      </section>
+
       {!user ? (
-        <section className="mt-8 rounded-lg border border-zinc-200 bg-white p-6">
-          <h1 className="text-lg font-semibold tracking-tight">Register</h1>
+        <section id="demo" className="mt-8 scroll-mt-6 rounded-lg border border-zinc-200 bg-white p-6">
+          <h2 className="text-lg font-semibold tracking-tight">Register</h2>
           <p className="mt-1 text-sm text-zinc-600">Local-only registration (stored in your browser).</p>
 
           <form
@@ -85,7 +93,7 @@ export default function HomePage() {
               e.preventDefault();
               const v = email.trim();
               if (!v) return;
-              const u: DemoUser = { user_id: uuid(), email: v };
+              const u: DemoUser = { user_id: uuidv4(), email: v };
               saveUser(u);
               setUser(u);
             }}
@@ -109,10 +117,10 @@ export default function HomePage() {
           </form>
         </section>
       ) : (
-        <section className="mt-8 rounded-lg border border-zinc-200 bg-white p-6">
+        <section id="demo" className="mt-8 scroll-mt-6 rounded-lg border border-zinc-200 bg-white p-6">
           <div className="flex items-start justify-between gap-4">
             <div>
-              <h1 className="text-lg font-semibold tracking-tight">Buy Air</h1>
+              <h2 className="text-lg font-semibold tracking-tight">Buy Air</h2>
               <p className="mt-1 text-sm text-zinc-600">
                 Signed-in as <span className="font-mono text-xs">{user.email}</span>
               </p>
@@ -141,22 +149,26 @@ export default function HomePage() {
                 setError(null);
                 setBuying(true);
                 try {
-                  const orderID = uuid();
+                  const orderID = uuidv4();
                   const externalOrderID = `demo-air:${user.user_id}:${orderID}`;
                   const out = await createAirInvoice({ external_order_id: externalOrderID, demo_user_id: user.user_id, email: user.email });
+                  if (!out.ok) {
+                    setError(out.error);
+                    return;
+                  }
 
                   const o: DemoOrder = {
                     order_id: orderID,
                     external_order_id: externalOrderID,
-                    invoice_id: out.invoice.invoice_id,
-                    invoice_token: out.invoice_token,
-                    address: out.invoice.address,
-                    amount_zat: out.invoice.amount_zat,
-                    status: out.invoice.status,
-                    received_zat_pending: out.invoice.received_zat_pending,
-                    received_zat_confirmed: out.invoice.received_zat_confirmed,
-                    created_at: out.invoice.created_at,
-                    updated_at: out.invoice.updated_at,
+                    invoice_id: out.data.invoice.invoice_id,
+                    invoice_token: out.data.invoice_token,
+                    address: out.data.invoice.address,
+                    amount_zat: out.data.invoice.amount_zat,
+                    status: out.data.invoice.status,
+                    received_zat_pending: out.data.invoice.received_zat_pending,
+                    received_zat_confirmed: out.data.invoice.received_zat_confirmed,
+                    created_at: out.data.invoice.created_at,
+                    updated_at: out.data.invoice.updated_at,
                     events_cursor: "0",
                   };
 
