@@ -170,10 +170,10 @@ locals {
   enable_caddy = trimspace(var.domain_name) != "" && trimspace(var.route53_zone_id) != ""
 
   stable_tag       = "prod"
-  image_juno_pay   = regexreplace(var.image_juno_pay_server, ":[^:@]+$", ":${local.stable_tag}")
-  image_junocashd  = regexreplace(var.image_junocashd, ":[^:@]+$", ":${local.stable_tag}")
-  image_juno_scan  = regexreplace(var.image_juno_scan, ":[^:@]+$", ":${local.stable_tag}")
-  image_demo_app   = var.enable_demo_app ? regexreplace(var.image_demo_app, ":[^:@]+$", ":${local.stable_tag}") : ""
+  image_juno_pay   = "${split(":", var.image_juno_pay_server)[0]}:${local.stable_tag}"
+  image_junocashd  = "${split(":", var.image_junocashd)[0]}:${local.stable_tag}"
+  image_juno_scan  = "${split(":", var.image_juno_scan)[0]}:${local.stable_tag}"
+  image_demo_app   = var.enable_demo_app ? "${split(":", var.image_demo_app)[0]}:${local.stable_tag}" : ""
 
   compose_yml = templatefile("${path.module}/templates/docker-compose.yml.tftpl", {
     name_prefix          = var.name_prefix
