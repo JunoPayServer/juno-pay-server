@@ -113,6 +113,9 @@ func TestPayServer_DepositFlow_E2E(t *testing.T) {
 	if err := testutil.WaitForHTTP200(readyCtx, payURL+"/v1/health"); err != nil {
 		t.Fatalf("pay server not ready: %v\n%s", err, payProc.Logs())
 	}
+	if err := testutil.WaitForHTTP200(readyCtx, payURL+"/v1/status"); err != nil {
+		t.Fatalf("pay server status not ready: %v\n%s", err, payProc.Logs())
+	}
 
 	client := mustClient(t)
 	mustAdminLogin(t, ctx, client, payURL, "pw")
@@ -245,7 +248,7 @@ func mustAdminCreateMerchant(t *testing.T, ctx context.Context, c *http.Client, 
 	b, _ := json.Marshal(map[string]any{
 		"name": name,
 		"settings": map[string]any{
-			"invoice_ttl_seconds":     900,
+			"invoice_ttl_seconds":    900,
 			"required_confirmations": 1,
 			"policies": map[string]any{
 				"late_payment_policy":    "manual_review",

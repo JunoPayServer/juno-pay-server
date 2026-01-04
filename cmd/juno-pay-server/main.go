@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -283,6 +284,10 @@ func (t junocashdTip) UptimeSeconds(ctx context.Context) (int64, error) {
 	}
 	var out int64
 	if err := t.cli.Call(ctx, "uptime", nil, &out); err != nil {
+		var rpcErr *junocashd.RPCError
+		if errors.As(err, &rpcErr) && rpcErr.Code == -32601 {
+			return 0, api.ErrUptimeUnsupported
+		}
 		return 0, err
 	}
 	if out < 0 {

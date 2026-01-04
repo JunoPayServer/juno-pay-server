@@ -53,6 +53,8 @@ type TipSource interface {
 	UptimeSeconds(ctx context.Context) (seconds int64, err error)
 }
 
+var ErrUptimeUnsupported = errors.New("api: uptime unsupported")
+
 type Clock interface {
 	Now() time.Time
 }
@@ -244,11 +246,17 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uptimeSeconds, err := s.tip.UptimeSeconds(ctx)
+	uptimeAny := any(uptimeSeconds)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", "uptime error")
-		return
+		if errors.Is(err, ErrUptimeUnsupported) {
+			uptimeAny = nil
+		} else {
+			writeError(w, http.StatusInternalServerError, "internal", "uptime error")
+			return
+		}
+	} else {
+		s.observeUptime(s.clock.Now().UTC(), uptimeSeconds)
 	}
-	s.observeUptime(s.clock.Now().UTC(), uptimeSeconds)
 
 	scannerConnected := false
 	if s.scanHealth != nil {
@@ -280,7 +288,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"chain": map[string]any{
 				"best_height":    bestHeight,
 				"best_hash":      bestHash,
-				"uptime_seconds": uptimeSeconds,
+				"uptime_seconds": uptimeAny,
 			},
 			"scanner": map[string]any{
 				"connected":           scannerConnected,
@@ -756,11 +764,19 @@ func (s *Server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uptimeSeconds, err := s.tip.UptimeSeconds(ctx)
+	uptimeAny := any(uptimeSeconds)
+	var restartsDetected int64
+	var lastRestartAt *time.Time
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", "uptime error")
-		return
+		if errors.Is(err, ErrUptimeUnsupported) {
+			uptimeAny = nil
+		} else {
+			writeError(w, http.StatusInternalServerError, "internal", "uptime error")
+			return
+		}
+	} else {
+		restartsDetected, lastRestartAt = s.observeUptime(s.clock.Now().UTC(), uptimeSeconds)
 	}
-	restartsDetected, lastRestartAt := s.observeUptime(s.clock.Now().UTC(), uptimeSeconds)
 
 	scannerConnected := false
 	if s.scanHealth != nil {
@@ -796,7 +812,7 @@ func (s *Server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 			"chain": map[string]any{
 				"best_height":    bestHeight,
 				"best_hash":      bestHash,
-				"uptime_seconds": uptimeSeconds,
+				"uptime_seconds": uptimeAny,
 			},
 			"scanner": map[string]any{
 				"connected":           scannerConnected,
