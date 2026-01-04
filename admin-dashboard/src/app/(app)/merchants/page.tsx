@@ -10,10 +10,12 @@ export default function MerchantsPage() {
   const [name, setName] = useState("");
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function refresh() {
     try {
+      setRefreshing(true);
       setError(null);
       const ms = await listMerchants();
       setMerchants(ms);
@@ -24,6 +26,7 @@ export default function MerchantsPage() {
       setError(e instanceof Error ? e.message : "load failed");
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }
 
@@ -89,9 +92,10 @@ export default function MerchantsPage() {
           <button
             type="button"
             onClick={() => refresh()}
-            className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-950 hover:bg-zinc-50"
+            disabled={refreshing}
+            className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-950 hover:bg-zinc-50 disabled:opacity-60"
           >
-            Refresh
+            {refreshing ? "Refreshing..." : "Refresh"}
           </button>
         </div>
 

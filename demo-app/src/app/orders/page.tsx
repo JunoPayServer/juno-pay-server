@@ -33,6 +33,7 @@ export default function OrdersPage() {
   const [selected, setSelected] = useState<string | null>(null);
   const [events, setEvents] = useState<InvoiceEvent[]>([]);
   const [eventsCursor, setEventsCursor] = useState("0");
+  const [refreshingAll, setRefreshingAll] = useState(false);
   const [loadingEvents, setLoadingEvents] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -44,6 +45,7 @@ export default function OrdersPage() {
 
   async function refreshAll() {
     setError(null);
+    setRefreshingAll(true);
     try {
       const next: DemoOrder[] = [];
       for (const o of orders) {
@@ -60,6 +62,8 @@ export default function OrdersPage() {
       setOrders(next);
     } catch (e) {
       setError(e instanceof Error ? e.message : "refresh failed");
+    } finally {
+      setRefreshingAll(false);
     }
   }
 
@@ -123,9 +127,10 @@ export default function OrdersPage() {
           <button
             type="button"
             onClick={() => refreshAll()}
-            className="rounded-md bg-zinc-950 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800"
+            disabled={refreshingAll}
+            className="rounded-md bg-zinc-950 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 disabled:opacity-60"
           >
-            Refresh all
+            {refreshingAll ? "Refreshing..." : "Refresh all"}
           </button>
         </div>
 

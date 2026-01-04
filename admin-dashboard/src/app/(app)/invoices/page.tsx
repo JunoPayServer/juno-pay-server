@@ -12,10 +12,12 @@ export default function InvoicesPage() {
 
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function refresh() {
     try {
+      setRefreshing(true);
       setError(null);
       const out = await listInvoices({
         merchant_id: merchantID.trim() || undefined,
@@ -29,6 +31,7 @@ export default function InvoicesPage() {
       setError(e instanceof Error ? e.message : "load failed");
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }
 
@@ -78,9 +81,10 @@ export default function InvoicesPage() {
           <button
             type="button"
             onClick={() => refresh()}
-            className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800"
+            disabled={refreshing}
+            className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-60"
           >
-            Apply Filters
+            {refreshing ? "Loading..." : "Apply Filters"}
           </button>
         </div>
 

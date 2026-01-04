@@ -18,12 +18,14 @@ export default function InvoiceDetailPage() {
   const [invoiceID, setInvoiceID] = useState("");
   const [inv, setInv] = useState<Invoice | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function refresh(id: string) {
     const v = id.trim();
     if (!v) return;
     try {
+      setRefreshing(true);
       setError(null);
       const out = await getInvoice(v);
       setInv(out);
@@ -32,6 +34,7 @@ export default function InvoiceDetailPage() {
       setError(e instanceof Error ? e.message : "load failed");
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }
 
@@ -64,9 +67,10 @@ export default function InvoiceDetailPage() {
         <button
           type="button"
           onClick={() => refresh(inv.invoice_id)}
-          className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-950 hover:bg-zinc-50"
+          disabled={refreshing}
+          className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-950 hover:bg-zinc-50 disabled:opacity-60"
         >
-          Refresh
+          {refreshing ? "Refreshing..." : "Refresh"}
         </button>
       </div>
 
@@ -96,4 +100,3 @@ export default function InvoiceDetailPage() {
     </div>
   );
 }
-

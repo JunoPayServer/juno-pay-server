@@ -11,6 +11,7 @@ export default function RefundsPage() {
 
   const [refunds, setRefunds] = useState<Refund[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [toAddress, setToAddress] = useState("");
@@ -18,9 +19,11 @@ export default function RefundsPage() {
   const [notes, setNotes] = useState("");
   const [externalRefundID, setExternalRefundID] = useState("");
   const [sentTxID, setSentTxID] = useState("");
+  const [creating, setCreating] = useState(false);
 
   async function refresh() {
     try {
+      setRefreshing(true);
       setError(null);
       const out = await listRefunds({
         merchant_id: merchantID.trim() || undefined,
@@ -34,6 +37,7 @@ export default function RefundsPage() {
       setError(e instanceof Error ? e.message : "load failed");
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }
 
@@ -56,6 +60,7 @@ export default function RefundsPage() {
             e.preventDefault();
             setError(null);
             try {
+              setCreating(true);
               const amt = Number.parseInt(amountZat, 10);
               await createRefund({
                 merchant_id: merchantID.trim(),
@@ -74,6 +79,8 @@ export default function RefundsPage() {
               await refresh();
             } catch (e) {
               setError(e instanceof Error ? e.message : "create failed");
+            } finally {
+              setCreating(false);
             }
           }}
         >
@@ -157,16 +164,18 @@ export default function RefundsPage() {
           <div className="sm:col-span-2">
             <button
               type="submit"
-              className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800"
+              disabled={creating}
+              className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-60"
             >
-              Create Refund
+              {creating ? "Creating..." : "Create Refund"}
             </button>
             <button
               type="button"
               onClick={() => refresh()}
-              className="ml-2 rounded-md border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-950 hover:bg-zinc-50"
+              disabled={refreshing}
+              className="ml-2 rounded-md border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-950 hover:bg-zinc-50 disabled:opacity-60"
             >
-              Refresh List
+              {refreshing ? "Refreshing..." : "Refresh List"}
             </button>
           </div>
         </form>
@@ -226,4 +235,3 @@ export default function RefundsPage() {
     </div>
   );
 }
-

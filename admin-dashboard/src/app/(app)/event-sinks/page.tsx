@@ -10,10 +10,13 @@ export default function EventSinksPage() {
   const [filterMerchantID, setFilterMerchantID] = useState("");
   const [sinks, setSinks] = useState<EventSink[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [merchantID, setMerchantID] = useState("");
   const [kind, setKind] = useState<Kind>("webhook");
+  const [creating, setCreating] = useState(false);
+  const [testingSinkID, setTestingSinkID] = useState<string | null>(null);
 
   const [webhookURL, setWebhookURL] = useState("");
   const [webhookSecret, setWebhookSecret] = useState("");
@@ -30,6 +33,7 @@ export default function EventSinksPage() {
 
   async function refresh() {
     try {
+      setRefreshing(true);
       setError(null);
       const out = await listEventSinks({ merchant_id: filterMerchantID.trim() || undefined });
       setSinks(out);
@@ -38,6 +42,7 @@ export default function EventSinksPage() {
       setError(e instanceof Error ? e.message : "load failed");
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }
 
@@ -78,6 +83,7 @@ export default function EventSinksPage() {
             e.preventDefault();
             setError(null);
             try {
+              setCreating(true);
               await createEventSink({
                 merchant_id: merchantID.trim(),
                 kind,
@@ -86,6 +92,8 @@ export default function EventSinksPage() {
               await refresh();
             } catch (e) {
               setError(e instanceof Error ? e.message : "create failed");
+            } finally {
+              setCreating(false);
             }
           }}
         >
@@ -224,9 +232,10 @@ export default function EventSinksPage() {
 
           <button
             type="submit"
-            className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800"
+            disabled={creating}
+            className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-60"
           >
-            Create Sink
+            {creating ? "Creating..." : "Create Sink"}
           </button>
         </form>
 
@@ -250,9 +259,10 @@ export default function EventSinksPage() {
             <button
               type="button"
               onClick={() => refresh()}
-              className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-950 hover:bg-zinc-50"
+              disabled={refreshing}
+              className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-950 hover:bg-zinc-50 disabled:opacity-60"
             >
-              Refresh
+              {refreshing ? "Refreshing..." : "Refresh"}
             </button>
           </div>
         </div>
@@ -288,17 +298,21 @@ export default function EventSinksPage() {
                     <td className="border-b border-zinc-100 px-3 py-2">
                       <button
                         type="button"
+                        disabled={testingSinkID === s.sink_id}
                         onClick={async () => {
+                          setTestingSinkID(s.sink_id);
                           try {
                             await testEventSink(s.sink_id);
                             alert("test delivered");
                           } catch (e) {
                             alert(e instanceof Error ? e.message : "test failed");
+                          } finally {
+                            setTestingSinkID(null);
                           }
                         }}
-                        className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-950 hover:bg-zinc-50"
+                        className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-950 hover:bg-zinc-50 disabled:opacity-60"
                       >
-                        Test
+                        {testingSinkID === s.sink_id ? "Testing..." : "Test"}
                       </button>
                     </td>
                   </tr>
@@ -311,4 +325,3 @@ export default function EventSinksPage() {
     </div>
   );
 }
-

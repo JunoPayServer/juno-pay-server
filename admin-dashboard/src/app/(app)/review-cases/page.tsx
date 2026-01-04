@@ -10,10 +10,13 @@ export default function ReviewCasesPage() {
 
   const [cases, setCases] = useState<ReviewCase[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [acting, setActing] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function refresh() {
     try {
+      setRefreshing(true);
       setError(null);
       const out = await listReviewCases({
         merchant_id: merchantID.trim() || undefined,
@@ -25,6 +28,7 @@ export default function ReviewCasesPage() {
       setError(e instanceof Error ? e.message : "load failed");
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }
 
@@ -69,9 +73,10 @@ export default function ReviewCasesPage() {
           <button
             type="button"
             onClick={() => refresh()}
-            className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800"
+            disabled={refreshing}
+            className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-60"
           >
-            Apply Filters
+            {refreshing ? "Loading..." : "Apply Filters"}
           </button>
         </div>
 
@@ -124,27 +129,45 @@ export default function ReviewCasesPage() {
                         <div className="flex items-center gap-2">
                           <button
                             type="button"
+                            disabled={acting === `${c.review_id}:resolve` || acting === `${c.review_id}:reject`}
                             onClick={async () => {
                               const notes = window.prompt("Resolve notes:");
                               if (!notes) return;
-                              await resolveReviewCase(c.review_id, notes);
-                              await refresh();
+                              setError(null);
+                              setActing(`${c.review_id}:resolve`);
+                              try {
+                                await resolveReviewCase(c.review_id, notes);
+                                await refresh();
+                              } catch (e) {
+                                setError(e instanceof Error ? e.message : "resolve failed");
+                              } finally {
+                                setActing(null);
+                              }
                             }}
-                            className="rounded-md bg-zinc-950 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800"
+                            className="rounded-md bg-zinc-950 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 disabled:opacity-60"
                           >
-                            Resolve
+                            {acting === `${c.review_id}:resolve` ? "Resolving..." : "Resolve"}
                           </button>
                           <button
                             type="button"
+                            disabled={acting === `${c.review_id}:resolve` || acting === `${c.review_id}:reject`}
                             onClick={async () => {
                               const notes = window.prompt("Reject notes:");
                               if (!notes) return;
-                              await rejectReviewCase(c.review_id, notes);
-                              await refresh();
+                              setError(null);
+                              setActing(`${c.review_id}:reject`);
+                              try {
+                                await rejectReviewCase(c.review_id, notes);
+                                await refresh();
+                              } catch (e) {
+                                setError(e instanceof Error ? e.message : "reject failed");
+                              } finally {
+                                setActing(null);
+                              }
                             }}
-                            className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-950 hover:bg-zinc-50"
+                            className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-950 hover:bg-zinc-50 disabled:opacity-60"
                           >
-                            Reject
+                            {acting === `${c.review_id}:reject` ? "Rejecting..." : "Reject"}
                           </button>
                         </div>
                       ) : (
@@ -161,4 +184,3 @@ export default function ReviewCasesPage() {
     </div>
   );
 }
-

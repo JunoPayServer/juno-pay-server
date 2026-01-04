@@ -32,6 +32,7 @@ export default function HomePage() {
 
   const [email, setEmail] = useState("");
   const [buying, setBuying] = useState(false);
+  const [refreshingLatest, setRefreshingLatest] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -195,8 +196,10 @@ export default function HomePage() {
               <div className="mt-4 flex items-center gap-2">
                 <button
                   type="button"
+                  disabled={refreshingLatest}
                   onClick={async () => {
                     setError(null);
+                    setRefreshingLatest(true);
                     try {
                       const updated = await refreshOne(lastOrder);
                       const next = [updated, ...orders.slice(1)];
@@ -204,11 +207,13 @@ export default function HomePage() {
                       setOrders(next);
                     } catch (e) {
                       setError(e instanceof Error ? e.message : "refresh failed");
+                    } finally {
+                      setRefreshingLatest(false);
                     }
                   }}
-                  className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-950 hover:bg-zinc-50"
+                  className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-950 hover:bg-zinc-50 disabled:opacity-60"
                 >
-                  Refresh status
+                  {refreshingLatest ? "Refreshing..." : "Refresh status"}
                 </button>
                 <Link href="/orders" className="text-xs font-medium text-zinc-700 hover:text-zinc-950">
                   View all orders →

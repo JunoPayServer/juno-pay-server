@@ -27,6 +27,7 @@ export default function MerchantDetailPage() {
   const [wallet, setWallet] = useState<MerchantWallet | null>(null);
   const [apiKeys, setAPIKeys] = useState<MerchantAPIKey[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [walletID, setWalletID] = useState("");
@@ -38,11 +39,16 @@ export default function MerchantDetailPage() {
   const [apiKeyLabel, setAPIKeyLabel] = useState("default");
   const [createdKey, setCreatedKey] = useState<{ api_key: string; key_id: string } | null>(null);
   const [revokeKeyID, setRevokeKeyID] = useState("");
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [settingWallet, setSettingWallet] = useState(false);
+  const [creatingKey, setCreatingKey] = useState(false);
+  const [revokingKey, setRevokingKey] = useState(false);
 
   async function refresh(id: string) {
     const v = id.trim();
     if (!v) return;
     try {
+      setRefreshing(true);
       setError(null);
       const m = await getMerchant(v);
       setMerchant(m);
@@ -54,6 +60,7 @@ export default function MerchantDetailPage() {
       setError(e instanceof Error ? e.message : "load failed");
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }
 
@@ -89,9 +96,10 @@ export default function MerchantDetailPage() {
           <button
             type="button"
             onClick={() => refresh(merchant.merchant_id)}
-            className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-950 hover:bg-zinc-50"
+            disabled={refreshing}
+            className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-950 hover:bg-zinc-50 disabled:opacity-60"
           >
-            Refresh
+            {refreshing ? "Refreshing..." : "Refresh"}
           </button>
         </div>
 
@@ -101,11 +109,14 @@ export default function MerchantDetailPage() {
             e.preventDefault();
             setError(null);
             try {
+              setSavingSettings(true);
               const updated = await setMerchantSettings(merchant.merchant_id, settings);
               setMerchant(updated);
               setSettings(cloneSettings(updated.settings));
             } catch (e) {
               setError(e instanceof Error ? e.message : "save failed");
+            } finally {
+              setSavingSettings(false);
             }
           }}
         >
@@ -165,8 +176,12 @@ export default function MerchantDetailPage() {
           </div>
 
           <div className="sm:col-span-2">
-            <button type="submit" className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800">
-              Save Settings
+            <button
+              type="submit"
+              disabled={savingSettings}
+              className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-60"
+            >
+              {savingSettings ? "Saving..." : "Save Settings"}
             </button>
           </div>
         </form>
@@ -213,6 +228,7 @@ export default function MerchantDetailPage() {
               e.preventDefault();
               setError(null);
               try {
+                setSettingWallet(true);
                 const out = await setMerchantWallet(merchant.merchant_id, {
                   wallet_id: walletID.trim(),
                   ufvk: ufvk.trim(),
@@ -229,6 +245,8 @@ export default function MerchantDetailPage() {
                   return;
                 }
                 setError(e instanceof Error ? e.message : "wallet set failed");
+              } finally {
+                setSettingWallet(false);
               }
             }}
           >
@@ -270,8 +288,12 @@ export default function MerchantDetailPage() {
               />
             </div>
             <div className="sm:col-span-2">
-              <button type="submit" className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800">
-                Set Wallet
+              <button
+                type="submit"
+                disabled={settingWallet}
+                className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-60"
+              >
+                {settingWallet ? "Setting..." : "Set Wallet"}
               </button>
             </div>
           </form>
@@ -328,11 +350,14 @@ export default function MerchantDetailPage() {
               setError(null);
               setCreatedKey(null);
               try {
+                setCreatingKey(true);
                 const out = await createAPIKey(merchant.merchant_id, apiKeyLabel.trim() || "default");
                 setCreatedKey({ api_key: out.api_key, key_id: out.key.key_id });
                 await refresh(merchant.merchant_id);
               } catch (e) {
                 setError(e instanceof Error ? e.message : "api key create failed");
+              } finally {
+                setCreatingKey(false);
               }
             }}
           >
@@ -344,8 +369,8 @@ export default function MerchantDetailPage() {
                 className="mt-1 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-950 shadow-sm"
               />
             </div>
-            <button type="submit" className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800">
-              Create API Key
+            <button type="submit" disabled={creatingKey} className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-60">
+              {creatingKey ? "Creating..." : "Create API Key"}
             </button>
 
             {createdKey ? (
@@ -366,11 +391,14 @@ export default function MerchantDetailPage() {
               if (!v) return;
               setError(null);
               try {
+                setRevokingKey(true);
                 await revokeAPIKey(v);
                 setRevokeKeyID("");
                 await refresh(merchant.merchant_id);
               } catch (e) {
                 setError(e instanceof Error ? e.message : "revoke failed");
+              } finally {
+                setRevokingKey(false);
               }
             }}
           >
@@ -383,8 +411,12 @@ export default function MerchantDetailPage() {
                 placeholder="key_..."
               />
             </div>
-            <button type="submit" className="rounded-md border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-950 hover:bg-zinc-50">
-              Revoke
+            <button
+              type="submit"
+              disabled={revokingKey}
+              className="rounded-md border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-950 hover:bg-zinc-50 disabled:opacity-60"
+            >
+              {revokingKey ? "Revoking..." : "Revoke"}
             </button>
           </form>
         </div>
