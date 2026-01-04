@@ -34,9 +34,9 @@ aws ecr get-login-password --region "$REGION" | docker login --username AWS --pa
 
 mkdir -p "$DATA_DIR"
 if [[ -n "$DATA_VOLUME_ID" ]]; then
-  VOL_ID_NOPREFIX="${DATA_VOLUME_ID#vol-}"
-  DEV_BY_ID_1="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${DATA_VOLUME_ID}"
-  DEV_BY_ID_2="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol${VOL_ID_NOPREFIX}"
+  VOL_ID_NOPREFIX="$(printf '%s' "$DATA_VOLUME_ID" | sed 's/^vol-//')"
+  DEV_BY_ID_1="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_$DATA_VOLUME_ID"
+  DEV_BY_ID_2="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol$VOL_ID_NOPREFIX"
   DEV=""
   for _ in {1..90}; do
     if [[ -b "$DEV_BY_ID_1" ]]; then
