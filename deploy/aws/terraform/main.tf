@@ -169,13 +169,19 @@ resource "aws_iam_instance_profile" "host" {
 locals {
   enable_caddy = trimspace(var.domain_name) != "" && trimspace(var.route53_zone_id) != ""
 
+  stable_tag       = "prod"
+  image_juno_pay   = regexreplace(var.image_juno_pay_server, ":[^:@]+$", ":${local.stable_tag}")
+  image_junocashd  = regexreplace(var.image_junocashd, ":[^:@]+$", ":${local.stable_tag}")
+  image_juno_scan  = regexreplace(var.image_juno_scan, ":[^:@]+$", ":${local.stable_tag}")
+  image_demo_app   = var.enable_demo_app ? regexreplace(var.image_demo_app, ":[^:@]+$", ":${local.stable_tag}") : ""
+
   compose_yml = templatefile("${path.module}/templates/docker-compose.yml.tftpl", {
     name_prefix          = var.name_prefix
-    image_junocashd      = var.image_junocashd
-    image_juno_scan      = var.image_juno_scan
-    image_juno_pay       = var.image_juno_pay_server
+    image_junocashd      = local.image_junocashd
+    image_juno_scan      = local.image_juno_scan
+    image_juno_pay       = local.image_juno_pay
     enable_demo_app      = var.enable_demo_app
-    image_demo_app       = var.enable_demo_app ? var.image_demo_app : ""
+    image_demo_app       = local.image_demo_app
     demo_port            = var.demo_port
     demo_api_key_enabled = var.demo_merchant_api_key_ssm_param != ""
     enable_caddy         = local.enable_caddy

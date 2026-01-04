@@ -354,4 +354,58 @@ PY
   fi
 fi
 
+UPDATE_SCRIPT="/usr/local/bin/$NAME_PREFIX-update-app.sh"
+cat > "$UPDATE_SCRIPT" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+exec 9>"/var/lock/$NAME_PREFIX-update-app.lock"
+flock -n 9 || exit 0
+
+REGION="$REGION"
+ROOT="$ROOT"
+
+ACCOUNT_ID="\$(aws sts get-caller-identity --region "\$REGION" --query Account --output text)"
+REGISTRY="\$ACCOUNT_ID.dkr.ecr.\$REGION.amazonaws.com"
+aws ecr get-login-password --region "\$REGION" | docker login --username AWS --password-stdin "\$REGISTRY" >/dev/null
+
+cd "\$ROOT"
+
+SERVICES=(juno-pay-server)
+if docker compose config --services | grep -qx demo-app; then
+  SERVICES+=(demo-app)
+fi
+
+docker compose pull "\${SERVICES[@]}"
+docker compose up -d --no-deps "\${SERVICES[@]}"
+EOF
+chmod +x "$UPDATE_SCRIPT"
+
+cat > "/etc/systemd/system/$NAME_PREFIX-update-app.service" <<EOF
+[Unit]
+Description=Update $NAME_PREFIX app containers
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=$UPDATE_SCRIPT
+EOF
+
+cat > "/etc/systemd/system/$NAME_PREFIX-update-app.timer" <<EOF
+[Unit]
+Description=Periodic update for $NAME_PREFIX app containers
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now "$NAME_PREFIX-update-app.timer"
+
 echo "juno-pay-server started"

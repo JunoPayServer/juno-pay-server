@@ -17,6 +17,7 @@ EOF
 REGION=""
 NAME_PREFIX="juno-pay"
 TAG=""
+STABLE_TAG="prod"
 JUNO_SCAN_REPO="https://github.com/Abdullah1738/juno-scan.git"
 JUNO_SCAN_REF="main"
 
@@ -67,13 +68,29 @@ JUNOCASHD_IMAGE="${REGISTRY}/${JUNOCASHD_REPO}:${TAG}"
 SCAN_IMAGE="${REGISTRY}/${SCAN_REPO_NAME}:${TAG}"
 DEMO_IMAGE="${REGISTRY}/${DEMO_REPO}:${TAG}"
 
-docker buildx build --platform linux/amd64 --push -t "${PAY_IMAGE}" -f Dockerfile .
-docker buildx build --platform linux/amd64 --push -t "${JUNOCASHD_IMAGE}" -f docker/junocashd/Dockerfile .
-docker buildx build --platform linux/amd64 --push -t "${SCAN_IMAGE}" \
+PAY_IMAGE_STABLE="${REGISTRY}/${PAY_REPO}:${STABLE_TAG}"
+JUNOCASHD_IMAGE_STABLE="${REGISTRY}/${JUNOCASHD_REPO}:${STABLE_TAG}"
+SCAN_IMAGE_STABLE="${REGISTRY}/${SCAN_REPO_NAME}:${STABLE_TAG}"
+DEMO_IMAGE_STABLE="${REGISTRY}/${DEMO_REPO}:${STABLE_TAG}"
+
+PAY_TAGS=(-t "${PAY_IMAGE}")
+JUNOCASHD_TAGS=(-t "${JUNOCASHD_IMAGE}")
+SCAN_TAGS=(-t "${SCAN_IMAGE}")
+DEMO_TAGS=(-t "${DEMO_IMAGE}")
+if [[ "${TAG}" != "${STABLE_TAG}" ]]; then
+  PAY_TAGS+=(-t "${PAY_IMAGE_STABLE}")
+  JUNOCASHD_TAGS+=(-t "${JUNOCASHD_IMAGE_STABLE}")
+  SCAN_TAGS+=(-t "${SCAN_IMAGE_STABLE}")
+  DEMO_TAGS+=(-t "${DEMO_IMAGE_STABLE}")
+fi
+
+docker buildx build --platform linux/amd64 --push "${PAY_TAGS[@]}" -f Dockerfile .
+docker buildx build --platform linux/amd64 --push "${JUNOCASHD_TAGS[@]}" -f docker/junocashd/Dockerfile .
+docker buildx build --platform linux/amd64 --push "${SCAN_TAGS[@]}" \
   --build-arg "JUNO_SCAN_REPO=${JUNO_SCAN_REPO}" \
   --build-arg "JUNO_SCAN_REF=${JUNO_SCAN_REF}" \
   -f docker/juno-scan/Dockerfile .
-docker buildx build --platform linux/amd64 --push -t "${DEMO_IMAGE}" -f docker/demo-app/Dockerfile .
+docker buildx build --platform linux/amd64 --push "${DEMO_TAGS[@]}" -f docker/demo-app/Dockerfile .
 
 cat <<EOF
 OK
