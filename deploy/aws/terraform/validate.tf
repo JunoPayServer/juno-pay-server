@@ -6,8 +6,8 @@ resource "terraform_data" "validate" {
   lifecycle {
     precondition {
       condition = var.create_network || (
-        trimspace(coalesce(var.vpc_id, "")) != "" &&
-        trimspace(coalesce(var.subnet_id, "")) != ""
+        try(trimspace(var.vpc_id), "") != "" &&
+        try(trimspace(var.subnet_id), "") != ""
       )
       error_message = "When create_network=false you must set vpc_id and subnet_id."
     }
@@ -23,7 +23,7 @@ resource "terraform_data" "validate" {
     }
 
     precondition {
-      condition     = !var.enable_demo_app || trimspace(coalesce(var.image_demo_app, "")) != ""
+      condition     = !var.enable_demo_app || try(trimspace(var.image_demo_app), "") != ""
       error_message = "image_demo_app is required when enable_demo_app=true."
     }
 
