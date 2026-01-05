@@ -376,8 +376,8 @@ if docker compose config --services | grep -qx demo-app; then
   SERVICES+=(demo-app)
 fi
 
-docker compose pull "$${SERVICES[@]}"
-docker compose up -d --no-deps "$${SERVICES[@]}"
+docker compose pull "\$${SERVICES[@]}"
+docker compose up -d --no-deps "\$${SERVICES[@]}"
 EOF
 chmod +x "$UPDATE_SCRIPT"
 

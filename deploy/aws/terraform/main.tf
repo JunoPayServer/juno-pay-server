@@ -244,6 +244,10 @@ resource "aws_instance" "host" {
   }))
   user_data_replace_on_change = true
 
+  lifecycle {
+    ignore_changes = [user_data_base64]
+  }
+
   tags = {
     Name = "${var.name_prefix}-host"
   }
