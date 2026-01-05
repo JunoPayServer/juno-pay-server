@@ -41,6 +41,9 @@ export function useLiveInvoice(input: { invoice_id: string; invoice_token: strin
   useEffect(() => {
     if (!input) return;
 
+    const invoiceID = input.invoice_id;
+    const invoiceToken = input.invoice_token;
+
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -52,9 +55,9 @@ export function useLiveInvoice(input: { invoice_id: string; invoice_token: strin
 
       try {
         const [invRes, statusRes, eventsRes] = await Promise.all([
-          getPublicInvoice({ invoice_id: input.invoice_id, invoice_token: input.invoice_token }),
+          getPublicInvoice({ invoice_id: invoiceID, invoice_token: invoiceToken }),
           getPublicStatus(),
-          listPublicInvoiceEvents({ invoice_id: input.invoice_id, invoice_token: input.invoice_token, cursor: cursorRef.current }),
+          listPublicInvoiceEvents({ invoice_id: invoiceID, invoice_token: invoiceToken, cursor: cursorRef.current }),
         ]);
 
         if (stopped) return;
@@ -104,4 +107,3 @@ export function useLiveInvoice(input: { invoice_id: string; invoice_token: strin
 
   return { invoice, bestHeight, confirmations, depositHeight, events, nextCursor, loading, error };
 }
-
