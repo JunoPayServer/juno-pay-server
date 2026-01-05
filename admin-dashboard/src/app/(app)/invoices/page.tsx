@@ -1,11 +1,13 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ErrorBanner } from "@/components/ErrorBanner";
 import { APIError, type Invoice, listInvoices } from "@/lib/api";
 
 export default function InvoicesPage() {
+  const router = useRouter();
   const [merchantID, setMerchantID] = useState("");
   const [status, setStatus] = useState("");
   const [externalOrderID, setExternalOrderID] = useState("");
@@ -15,14 +17,29 @@ export default function InvoicesPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function refresh() {
+  function syncURL(next: { merchantID: string; status: string; externalOrderID: string }) {
+    const p = new URLSearchParams();
+    if (next.merchantID.trim()) p.set("merchant_id", next.merchantID.trim());
+    if (next.status.trim()) p.set("status", next.status.trim());
+    if (next.externalOrderID.trim()) p.set("external_order_id", next.externalOrderID.trim());
+    const q = p.toString();
+    router.replace(`/invoices${q ? `?${q}` : ""}`);
+  }
+
+  async function refresh(override?: { merchantID?: string; status?: string; externalOrderID?: string }) {
+    const next = {
+      merchantID: override?.merchantID ?? merchantID,
+      status: override?.status ?? status,
+      externalOrderID: override?.externalOrderID ?? externalOrderID,
+    };
     try {
       setRefreshing(true);
       setError(null);
+      syncURL(next);
       const out = await listInvoices({
-        merchant_id: merchantID.trim() || undefined,
-        status: status.trim() || undefined,
-        external_order_id: externalOrderID.trim() || undefined,
+        merchant_id: next.merchantID.trim() || undefined,
+        status: next.status.trim() || undefined,
+        external_order_id: next.externalOrderID.trim() || undefined,
         limit: "100",
       });
       setInvoices(out.invoices);
@@ -36,7 +53,14 @@ export default function InvoicesPage() {
   }
 
   useEffect(() => {
-    void refresh();
+    const sp = new URLSearchParams(window.location.search);
+    const m = sp.get("merchant_id") ?? "";
+    const st = sp.get("status") ?? "";
+    const ext = sp.get("external_order_id") ?? "";
+    setMerchantID(m);
+    setStatus(st);
+    setExternalOrderID(ext);
+    void refresh({ merchantID: m, status: st, externalOrderID: ext });
   }, []);
 
   return (
@@ -59,12 +83,22 @@ export default function InvoicesPage() {
           </div>
           <div>
             <label className="block text-sm font-medium text-zinc-700">Status</label>
-            <input
+            <select
               value={status}
               onChange={(e) => setStatus(e.target.value)}
               className="mt-1 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-950 shadow-sm"
-              placeholder="open|paid|..."
-            />
+            >
+              <option value="">(any)</option>
+              <option value="open">open</option>
+              <option value="partial_pending">partial_pending</option>
+              <option value="pending">pending</option>
+              <option value="partial_confirmed">partial_confirmed</option>
+              <option value="confirmed">confirmed</option>
+              <option value="overpaid">overpaid</option>
+              <option value="expired">expired</option>
+              <option value="paid_late">paid_late</option>
+              <option value="canceled">canceled</option>
+            </select>
           </div>
           <div className="sm:col-span-2">
             <label className="block text-sm font-medium text-zinc-700">External Order ID</label>

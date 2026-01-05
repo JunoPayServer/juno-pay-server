@@ -1,10 +1,12 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ErrorBanner } from "@/components/ErrorBanner";
 import { APIError, type EventDelivery, listEventDeliveries } from "@/lib/api";
 
 export default function EventDeliveriesPage() {
+  const router = useRouter();
   const [merchantID, setMerchantID] = useState("");
   const [sinkID, setSinkID] = useState("");
   const [status, setStatus] = useState("");
@@ -14,14 +16,29 @@ export default function EventDeliveriesPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function refresh() {
+  function syncURL(next: { merchantID: string; sinkID: string; status: string }) {
+    const p = new URLSearchParams();
+    if (next.merchantID.trim()) p.set("merchant_id", next.merchantID.trim());
+    if (next.sinkID.trim()) p.set("sink_id", next.sinkID.trim());
+    if (next.status.trim()) p.set("status", next.status.trim());
+    const q = p.toString();
+    router.replace(`/event-deliveries${q ? `?${q}` : ""}`);
+  }
+
+  async function refresh(override?: { merchantID?: string; sinkID?: string; status?: string }) {
+    const next = {
+      merchantID: override?.merchantID ?? merchantID,
+      sinkID: override?.sinkID ?? sinkID,
+      status: override?.status ?? status,
+    };
     try {
       setRefreshing(true);
       setError(null);
+      syncURL(next);
       const out = await listEventDeliveries({
-        merchant_id: merchantID.trim() || undefined,
-        sink_id: sinkID.trim() || undefined,
-        status: status.trim() || undefined,
+        merchant_id: next.merchantID.trim() || undefined,
+        sink_id: next.sinkID.trim() || undefined,
+        status: next.status.trim() || undefined,
         limit: "200",
       });
       setDeliveries(out);
@@ -35,7 +52,14 @@ export default function EventDeliveriesPage() {
   }
 
   useEffect(() => {
-    void refresh();
+    const sp = new URLSearchParams(window.location.search);
+    const m = sp.get("merchant_id") ?? "";
+    const s = sp.get("sink_id") ?? "";
+    const st = sp.get("status") ?? "";
+    setMerchantID(m);
+    setSinkID(s);
+    setStatus(st);
+    void refresh({ merchantID: m, sinkID: s, status: st });
   }, []);
 
   return (
@@ -67,12 +91,16 @@ export default function EventDeliveriesPage() {
           </div>
           <div className="sm:col-span-2">
             <label className="block text-sm font-medium text-zinc-700">Status</label>
-            <input
+            <select
               value={status}
               onChange={(e) => setStatus(e.target.value)}
               className="mt-1 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-950 shadow-sm"
-              placeholder="pending|delivered|failed|..."
-            />
+            >
+              <option value="">(any)</option>
+              <option value="pending">pending</option>
+              <option value="delivered">delivered</option>
+              <option value="failed">failed</option>
+            </select>
           </div>
         </div>
 

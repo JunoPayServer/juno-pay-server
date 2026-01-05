@@ -1,21 +1,34 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ErrorBanner } from "@/components/ErrorBanner";
 import { APIError, type CloudEvent, listOutboundEvents } from "@/lib/api";
 
 export default function OutboundEventsPage() {
+  const router = useRouter();
   const [merchantID, setMerchantID] = useState("");
   const [events, setEvents] = useState<CloudEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function refresh() {
+  function syncURL(next: { merchantID: string }) {
+    const p = new URLSearchParams();
+    if (next.merchantID.trim()) p.set("merchant_id", next.merchantID.trim());
+    const q = p.toString();
+    router.replace(`/events${q ? `?${q}` : ""}`);
+  }
+
+  async function refresh(override?: { merchantID?: string }) {
+    const next = {
+      merchantID: override?.merchantID ?? merchantID,
+    };
     try {
       setRefreshing(true);
       setError(null);
-      const out = await listOutboundEvents({ merchant_id: merchantID.trim() || undefined, limit: "100" });
+      syncURL(next);
+      const out = await listOutboundEvents({ merchant_id: next.merchantID.trim() || undefined, limit: "100" });
       setEvents(out.events);
     } catch (e) {
       if (e instanceof APIError && e.status === 401) return;
@@ -27,7 +40,10 @@ export default function OutboundEventsPage() {
   }
 
   useEffect(() => {
-    void refresh();
+    const sp = new URLSearchParams(window.location.search);
+    const m = sp.get("merchant_id") ?? "";
+    setMerchantID(m);
+    void refresh({ merchantID: m });
   }, []);
 
   return (

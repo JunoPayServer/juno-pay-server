@@ -1,28 +1,46 @@
 "use client";
 
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ErrorBanner } from "@/components/ErrorBanner";
-import { APIError, type ReviewCase, listReviewCases, rejectReviewCase, resolveReviewCase } from "@/lib/api";
+import { APIError, type ReviewCase, getInvoice, listReviewCases, rejectReviewCase, resolveReviewCase } from "@/lib/api";
 
 export default function ReviewCasesPage() {
+  const router = useRouter();
   const [merchantID, setMerchantID] = useState("");
   const [status, setStatus] = useState("open");
 
   const [cases, setCases] = useState<ReviewCase[]>([]);
+  const [invoiceLabels, setInvoiceLabels] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [acting, setActing] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  async function refresh() {
+  function syncURL(next: { merchantID: string; status: string }) {
+    const p = new URLSearchParams();
+    if (next.merchantID.trim()) p.set("merchant_id", next.merchantID.trim());
+    if (next.status.trim()) p.set("status", next.status.trim());
+    const q = p.toString();
+    router.replace(`/review-cases${q ? `?${q}` : ""}`);
+  }
+
+  async function refresh(override?: { merchantID?: string; status?: string }) {
+    const next = {
+      merchantID: override?.merchantID ?? merchantID,
+      status: override?.status ?? status,
+    };
     try {
       setRefreshing(true);
       setError(null);
+      syncURL(next);
       const out = await listReviewCases({
-        merchant_id: merchantID.trim() || undefined,
-        status: status.trim() || undefined,
+        merchant_id: next.merchantID.trim() || undefined,
+        status: next.status.trim() || undefined,
       });
       setCases(out);
+      void hydrateInvoiceLabels(out);
     } catch (e) {
       if (e instanceof APIError && e.status === 401) return;
       setError(e instanceof Error ? e.message : "load failed");
@@ -33,8 +51,38 @@ export default function ReviewCasesPage() {
   }
 
   useEffect(() => {
-    void refresh();
+    const sp = new URLSearchParams(window.location.search);
+    const m = sp.get("merchant_id") ?? "";
+    const st = sp.get("status") ?? "open";
+    setMerchantID(m);
+    setStatus(st);
+    void refresh({ merchantID: m, status: st });
   }, []);
+
+  async function hydrateInvoiceLabels(cs: ReviewCase[]) {
+    const ids = Array.from(new Set(cs.map((c) => c.invoice_id).filter((v): v is string => Boolean(v && v.trim()))));
+    const missing = ids.filter((id) => !invoiceLabels[id]);
+    if (missing.length === 0) return;
+
+    const entries = await Promise.all(
+      missing.map(async (id) => {
+        try {
+          const inv = await getInvoice(id);
+          return [id, inv.external_order_id] as const;
+        } catch {
+          return null;
+        }
+      }),
+    );
+
+    const next: Record<string, string> = {};
+    for (const e of entries) {
+      if (!e) continue;
+      next[e[0]] = e[1];
+    }
+    if (Object.keys(next).length === 0) return;
+    setInvoiceLabels((prev) => ({ ...prev, ...next }));
+  }
 
   return (
     <div className="space-y-6">
@@ -117,7 +165,19 @@ export default function ReviewCasesPage() {
                     <td className="border-b border-zinc-100 px-3 py-2">{c.reason}</td>
                     <td className="border-b border-zinc-100 px-3 py-2">{c.status}</td>
                     <td className="border-b border-zinc-100 px-3 py-2">
-                      {c.invoice_id ? <span className="font-mono text-xs">{c.invoice_id}</span> : "—"}
+                      {c.invoice_id ? (
+                        <div>
+                          <Link
+                            href={`/invoice?invoice_id=${encodeURIComponent(c.invoice_id)}`}
+                            className="font-medium text-zinc-950 hover:underline"
+                          >
+                            {invoiceLabels[c.invoice_id] ?? "Invoice"}
+                          </Link>
+                          <div className="font-mono text-xs text-zinc-500">{c.invoice_id}</div>
+                        </div>
+                      ) : (
+                        "—"
+                      )}
                     </td>
                     <td className="border-b border-zinc-100 px-3 py-2">
                       <div className="max-w-sm truncate text-xs text-zinc-700" title={c.notes}>

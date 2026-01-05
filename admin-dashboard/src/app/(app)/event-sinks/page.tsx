@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ErrorBanner } from "@/components/ErrorBanner";
 import { APIError, type EventSink, createEventSink, listEventSinks, testEventSink } from "@/lib/api";
@@ -7,6 +8,7 @@ import { APIError, type EventSink, createEventSink, listEventSinks, testEventSin
 type Kind = "webhook" | "kafka" | "nats" | "rabbitmq";
 
 export default function EventSinksPage() {
+  const router = useRouter();
   const [filterMerchantID, setFilterMerchantID] = useState("");
   const [sinks, setSinks] = useState<EventSink[]>([]);
   const [loading, setLoading] = useState(true);
@@ -31,11 +33,20 @@ export default function EventSinksPage() {
   const [rmqURL, setRmqURL] = useState("");
   const [rmqQueue, setRmqQueue] = useState("");
 
-  async function refresh() {
+  function syncURL(next: { filterMerchantID: string }) {
+    const p = new URLSearchParams();
+    if (next.filterMerchantID.trim()) p.set("merchant_id", next.filterMerchantID.trim());
+    const q = p.toString();
+    router.replace(`/event-sinks${q ? `?${q}` : ""}`);
+  }
+
+  async function refresh(override?: { filterMerchantID?: string }) {
+    const next = { filterMerchantID: override?.filterMerchantID ?? filterMerchantID };
     try {
       setRefreshing(true);
       setError(null);
-      const out = await listEventSinks({ merchant_id: filterMerchantID.trim() || undefined });
+      syncURL(next);
+      const out = await listEventSinks({ merchant_id: next.filterMerchantID.trim() || undefined });
       setSinks(out);
     } catch (e) {
       if (e instanceof APIError && e.status === 401) return;
@@ -47,7 +58,10 @@ export default function EventSinksPage() {
   }
 
   useEffect(() => {
-    void refresh();
+    const sp = new URLSearchParams(window.location.search);
+    const m = sp.get("merchant_id") ?? "";
+    setFilterMerchantID(m);
+    void refresh({ filterMerchantID: m });
   }, []);
 
   function buildConfig(): Record<string, unknown> {

@@ -1,15 +1,19 @@
 "use client";
 
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ErrorBanner } from "@/components/ErrorBanner";
-import { APIError, type Refund, createRefund, listRefunds } from "@/lib/api";
+import { APIError, type Refund, createRefund, getInvoice, listRefunds } from "@/lib/api";
 
 export default function RefundsPage() {
+  const router = useRouter();
   const [merchantID, setMerchantID] = useState("");
   const [invoiceID, setInvoiceID] = useState("");
   const [status, setStatus] = useState("");
 
   const [refunds, setRefunds] = useState<Refund[]>([]);
+  const [invoiceLabels, setInvoiceLabels] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -21,17 +25,33 @@ export default function RefundsPage() {
   const [sentTxID, setSentTxID] = useState("");
   const [creating, setCreating] = useState(false);
 
-  async function refresh() {
+  function syncURL(next: { merchantID: string; invoiceID: string; status: string }) {
+    const p = new URLSearchParams();
+    if (next.merchantID.trim()) p.set("merchant_id", next.merchantID.trim());
+    if (next.invoiceID.trim()) p.set("invoice_id", next.invoiceID.trim());
+    if (next.status.trim()) p.set("status", next.status.trim());
+    const q = p.toString();
+    router.replace(`/refunds${q ? `?${q}` : ""}`);
+  }
+
+  async function refresh(override?: { merchantID?: string; invoiceID?: string; status?: string }) {
+    const next = {
+      merchantID: override?.merchantID ?? merchantID,
+      invoiceID: override?.invoiceID ?? invoiceID,
+      status: override?.status ?? status,
+    };
     try {
       setRefreshing(true);
       setError(null);
+      syncURL(next);
       const out = await listRefunds({
-        merchant_id: merchantID.trim() || undefined,
-        invoice_id: invoiceID.trim() || undefined,
-        status: status.trim() || undefined,
+        merchant_id: next.merchantID.trim() || undefined,
+        invoice_id: next.invoiceID.trim() || undefined,
+        status: next.status.trim() || undefined,
         limit: "100",
       });
       setRefunds(out.refunds);
+      void hydrateInvoiceLabels(out.refunds);
     } catch (e) {
       if (e instanceof APIError && e.status === 401) return;
       setError(e instanceof Error ? e.message : "load failed");
@@ -42,8 +62,40 @@ export default function RefundsPage() {
   }
 
   useEffect(() => {
-    void refresh();
+    const sp = new URLSearchParams(window.location.search);
+    const m = sp.get("merchant_id") ?? "";
+    const inv = sp.get("invoice_id") ?? "";
+    const st = sp.get("status") ?? "";
+    setMerchantID(m);
+    setInvoiceID(inv);
+    setStatus(st);
+    void refresh({ merchantID: m, invoiceID: inv, status: st });
   }, []);
+
+  async function hydrateInvoiceLabels(rs: Refund[]) {
+    const ids = Array.from(new Set(rs.map((r) => r.invoice_id).filter((v): v is string => Boolean(v && v.trim()))));
+    const missing = ids.filter((id) => !invoiceLabels[id]);
+    if (missing.length === 0) return;
+
+    const entries = await Promise.all(
+      missing.map(async (id) => {
+        try {
+          const inv = await getInvoice(id);
+          return [id, inv.external_order_id] as const;
+        } catch {
+          return null;
+        }
+      }),
+    );
+
+    const next: Record<string, string> = {};
+    for (const e of entries) {
+      if (!e) continue;
+      next[e[0]] = e[1];
+    }
+    if (Object.keys(next).length === 0) return;
+    setInvoiceLabels((prev) => ({ ...prev, ...next }));
+  }
 
   return (
     <div className="space-y-6">
@@ -220,7 +272,16 @@ export default function RefundsPage() {
                       <span className="font-mono text-xs">{r.merchant_id}</span>
                     </td>
                     <td className="border-b border-zinc-100 px-3 py-2">
-                      {r.invoice_id ? <span className="font-mono text-xs">{r.invoice_id}</span> : "—"}
+                      {r.invoice_id ? (
+                        <div>
+                          <Link href={`/invoice?invoice_id=${encodeURIComponent(r.invoice_id)}`} className="font-medium text-zinc-950 hover:underline">
+                            {invoiceLabels[r.invoice_id] ?? "Invoice"}
+                          </Link>
+                          <div className="font-mono text-xs text-zinc-500">{r.invoice_id}</div>
+                        </div>
+                      ) : (
+                        "—"
+                      )}
                     </td>
                     <td className="border-b border-zinc-100 px-3 py-2">{r.amount_zat}</td>
                     <td className="border-b border-zinc-100 px-3 py-2">{r.status}</td>
