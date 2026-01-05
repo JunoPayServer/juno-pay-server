@@ -15,6 +15,8 @@ const state = {
   events: new Map(),
   nextInvoiceN: 1,
   nextEventN: 1,
+  bestHeight: 100,
+  confirmTimers: new Map(),
 };
 
 function nowRFC3339() {
@@ -84,6 +86,27 @@ const backend = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
 
+    if (req.method === "GET" && url.pathname === "/v1/status") {
+      return sendJSON(res, 200, {
+        status: "ok",
+        data: {
+          chain: {
+            best_height: state.bestHeight,
+            best_hash: "e2e",
+            uptime_seconds: 1,
+          },
+          scanner: {
+            connected: true,
+            last_cursor_applied: 0,
+            last_event_at: null,
+          },
+          event_delivery: {
+            pending_deliveries: 0,
+          },
+        },
+      });
+    }
+
     if (req.method === "POST" && url.pathname === "/v1/invoices") {
       if (bearer(req) !== merchantKey) {
         return sendJSON(res, 401, { status: "error", error: { code: "unauthorized", message: "unauthorized" } });
@@ -112,6 +135,7 @@ const backend = http.createServer(async (req, res) => {
       const now = nowRFC3339();
       const invoiceId = `inv_${state.nextInvoiceN++}`;
       const token = crypto.randomBytes(16).toString("hex");
+      const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
       const invoice = {
         invoice_id: invoiceId,
         merchant_id: "m_demo",
@@ -122,7 +146,7 @@ const backend = http.createServer(async (req, res) => {
         required_confirmations: 100,
         received_zat_pending: 0,
         received_zat_confirmed: 0,
-        expires_at: null,
+        expires_at: expiresAt,
         created_at: now,
         updated_at: now,
         policies: {
@@ -172,8 +196,8 @@ const backend = http.createServer(async (req, res) => {
       }
       const now = nowRFC3339();
       pub.invoice.received_zat_pending = pub.invoice.amount_zat;
-      pub.invoice.received_zat_confirmed = pub.invoice.amount_zat;
-      pub.invoice.status = "paid";
+      pub.invoice.received_zat_confirmed = 0;
+      pub.invoice.status = "pending";
       pub.invoice.updated_at = now;
 
       const deposit = {
@@ -181,11 +205,31 @@ const backend = http.createServer(async (req, res) => {
         txid: crypto.randomBytes(32).toString("hex"),
         action_index: 0,
         amount_zat: pub.invoice.amount_zat,
-        height: 100,
+        height: state.bestHeight,
       };
       addEvent(invoiceId, "deposit.detected", deposit);
-      addEvent(invoiceId, "deposit.confirmed", deposit);
       addEvent(invoiceId, "invoice.paid");
+
+      if (!state.confirmTimers.has(invoiceId)) {
+        const required = pub.invoice.required_confirmations || 0;
+        const depositHeight = deposit.height;
+        const timer = setInterval(() => {
+          state.bestHeight += 1;
+          const confs = state.bestHeight - depositHeight + 1;
+          if (confs >= required) {
+            clearInterval(timer);
+            state.confirmTimers.delete(invoiceId);
+
+            const now2 = nowRFC3339();
+            pub.invoice.received_zat_confirmed = pub.invoice.amount_zat;
+            pub.invoice.status = "confirmed";
+            pub.invoice.updated_at = now2;
+            addEvent(invoiceId, "deposit.confirmed", deposit);
+          }
+        }, 50);
+        state.confirmTimers.set(invoiceId, timer);
+      }
+
       return sendJSON(res, 200, { status: "ok", data: { paid: true } });
     }
 
@@ -211,6 +255,8 @@ const nextProc = spawn(nextBin, ["start", "-p", String(frontendPort)], {
 });
 
 function shutdown() {
+  for (const t of state.confirmTimers.values()) clearInterval(t);
+  state.confirmTimers.clear();
   backend.close();
   nextProc.kill("SIGTERM");
 }
