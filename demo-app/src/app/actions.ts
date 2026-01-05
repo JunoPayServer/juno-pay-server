@@ -63,6 +63,22 @@ export type InvoiceEventsPage = {
   next_cursor: string;
 };
 
+export type StatusSnapshot = {
+  chain: {
+    best_height: number;
+    best_hash: string;
+    uptime_seconds: number;
+  };
+  scanner: {
+    connected: boolean;
+    last_cursor_applied: number;
+    last_event_at?: string | null;
+  };
+  event_delivery: {
+    pending_deliveries: number;
+  };
+};
+
 function baseURL(): string | null {
   const v = (process.env.JUNO_PAY_BASE_URL ?? "").trim();
   return v ? v.replace(/\/+$/, "") : null;
@@ -153,4 +169,8 @@ export async function listPublicInvoiceEvents(input: {
     q.set("cursor", input.cursor.trim());
   }
   return fetchAPI<InvoiceEventsPage>(`/v1/public/invoices/${encodeURIComponent(input.invoice_id)}/events?${q.toString()}`, { method: "GET" });
+}
+
+export async function getPublicStatus(): Promise<ActionResult<StatusSnapshot>> {
+  return fetchAPI<StatusSnapshot>("/v1/status", { method: "GET" });
 }

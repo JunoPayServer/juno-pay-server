@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { createAirInvoice, getPublicInvoice } from "@/app/actions";
+import { createAirInvoice } from "@/app/actions";
+import { InvoiceCheckoutCard } from "@/app/_components/InvoiceCheckoutCard";
 import { clearUser, loadOrders, loadUser, saveOrders, saveUser, type DemoOrder, type DemoUser } from "@/lib/storage";
 import { uuidv4 } from "@/lib/uuid";
 
@@ -18,7 +19,6 @@ export default function HomePage() {
 
   const [email, setEmail] = useState("");
   const [buying, setBuying] = useState(false);
-  const [refreshingLatest, setRefreshingLatest] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -27,21 +27,6 @@ export default function HomePage() {
   }, []);
 
   const lastOrder = useMemo(() => orders[0] ?? null, [orders]);
-
-  async function refreshOne(o: DemoOrder) {
-    const invRes = await getPublicInvoice({ invoice_id: o.invoice_id, invoice_token: o.invoice_token });
-    if (!invRes.ok) {
-      throw new Error(invRes.error);
-    }
-    const inv = invRes.data;
-    return {
-      ...o,
-      status: inv.status,
-      received_zat_pending: inv.received_zat_pending,
-      received_zat_confirmed: inv.received_zat_confirmed,
-      updated_at: inv.updated_at,
-    } satisfies DemoOrder;
-  }
 
   return (
     <div className="mx-auto max-w-3xl p-6">
@@ -188,49 +173,20 @@ export default function HomePage() {
           </div>
 
           {lastOrder ? (
-            <div className="mt-6 rounded-md border border-zinc-200 bg-white p-4">
-              <div className="text-sm font-semibold text-zinc-950">Latest order</div>
-              <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <div>
-                  <div className="text-xs text-zinc-500">Invoice ID</div>
-                  <div className="mt-1 font-mono text-xs">{lastOrder.invoice_id}</div>
-                </div>
-                <div>
-                  <div className="text-xs text-zinc-500">Status</div>
-                  <div className="mt-1 text-sm">{lastOrder.status}</div>
-                </div>
-                <div className="sm:col-span-2">
-                  <div className="text-xs text-zinc-500">Deposit address</div>
-                  <div className="mt-1 font-mono text-xs break-all">{lastOrder.address}</div>
-                </div>
-              </div>
-
-              <div className="mt-4 flex items-center gap-2">
-                <button
-                  type="button"
-                  disabled={refreshingLatest}
-                  onClick={async () => {
-                    setError(null);
-                    setRefreshingLatest(true);
-                    try {
-                      const updated = await refreshOne(lastOrder);
-                      const next = [updated, ...orders.slice(1)];
-                      saveOrders(next);
-                      setOrders(next);
-                    } catch (e) {
-                      setError(e instanceof Error ? e.message : "refresh failed");
-                    } finally {
-                      setRefreshingLatest(false);
-                    }
-                  }}
-                  className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-950 hover:bg-zinc-50 disabled:opacity-60"
-                >
-                  {refreshingLatest ? "Refreshing..." : "Refresh status"}
-                </button>
-                <Link href="/orders" className="text-xs font-medium text-zinc-700 hover:text-zinc-950">
-                  View all orders →
-                </Link>
-              </div>
+            <div className="mt-6 space-y-3">
+              <InvoiceCheckoutCard
+                order={lastOrder}
+                onOrderUpdate={(next) => {
+                  setOrders((prev) => {
+                    const updated = prev.map((o) => (o.order_id === next.order_id ? next : o));
+                    saveOrders(updated);
+                    return updated;
+                  });
+                }}
+              />
+              <Link href="/orders" className="inline-block text-xs font-medium text-zinc-700 hover:text-zinc-950">
+                View all orders →
+              </Link>
             </div>
           ) : (
             <div className="mt-6 text-sm text-zinc-600">No orders yet.</div>
