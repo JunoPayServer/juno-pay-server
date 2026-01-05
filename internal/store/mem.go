@@ -591,8 +591,9 @@ func (s *MemStore) ApplyScanEvent(_ context.Context, ev ScanEvent) error {
 		if err := json.Unmarshal(ev.Payload, &p); err != nil {
 			return err
 		}
-		ch := p.ConfirmedHeight
-		s.applyDepositLocked(ev, p.WalletID, p.TxID, int32(p.ActionIndex), p.RecipientAddress, p.AmountZatoshis, p.Height, "confirmed", &ch)
+		// Note: do not mark deposits as confirmed here. Confirmation is per-invoice (required_confirmations)
+		// and is handled by UpdateInvoiceConfirmations based on chain tip height.
+		s.applyDepositLocked(ev, p.WalletID, p.TxID, int32(p.ActionIndex), p.RecipientAddress, p.AmountZatoshis, p.Height, "detected", nil)
 	case types.WalletEventKindDepositUnconfirmed:
 		var p types.DepositUnconfirmedPayload
 		if err := json.Unmarshal(ev.Payload, &p); err != nil {
@@ -615,6 +616,56 @@ func (s *MemStore) ApplyScanEvent(_ context.Context, ev ScanEvent) error {
 		t = time.Now().UTC()
 	}
 	s.scanLastEventAt[ev.WalletID] = t
+	return nil
+}
+
+func (s *MemStore) UpdateInvoiceConfirmations(_ context.Context, bestHeight int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC()
+
+	affectedInvoices := make(map[string]struct{})
+	for k, d := range s.deposits {
+		if d.InvoiceID == "" || d.Status != "detected" {
+			continue
+		}
+
+		inv, ok := s.invoices[d.InvoiceID]
+		if !ok {
+			continue
+		}
+
+		required := int64(inv.RequiredConfirmations)
+		if required <= 0 {
+			required = 1
+		}
+
+		confs := bestHeight - d.Height + 1
+		if confs < required {
+			continue
+		}
+
+		ch := d.Height + required - 1
+		d.Status = "confirmed"
+		d.ConfirmedHeight = &ch
+		d.UpdatedAt = now
+		s.deposits[k] = d
+
+		depRef := &domain.DepositRef{
+			WalletID:    d.WalletID,
+			TxID:        d.TxID,
+			ActionIndex: d.ActionIndex,
+			AmountZat:   d.AmountZat,
+			Height:      d.Height,
+		}
+		s.appendInvoiceEventLocked(d.InvoiceID, domain.InvoiceEventDepositConfirmed, now, depRef, nil)
+		affectedInvoices[d.InvoiceID] = struct{}{}
+	}
+
+	for invoiceID := range affectedInvoices {
+		s.recomputeInvoiceLocked(invoiceID)
+	}
 	return nil
 }
 
@@ -1047,6 +1098,9 @@ func (s *MemStore) applyDepositLocked(ev ScanEvent, walletID, txid string, actio
 		if detectedAt.IsZero() {
 			detectedAt = now
 		}
+		if status == "unconfirmed" || status == "orphaned" {
+			confirmedHeight = nil
+		}
 		rec = depositRecord{
 			Seq:              s.depositSeq,
 			WalletID:         walletID,
@@ -1062,8 +1116,27 @@ func (s *MemStore) applyDepositLocked(ev ScanEvent, walletID, txid string, actio
 			UpdatedAt:        now,
 		}
 	} else {
-		rec.Status = status
-		rec.ConfirmedHeight = confirmedHeight
+		rec.RecipientAddress = addr
+		rec.AmountZat = amountZat
+		rec.Height = height
+
+		incomingStatus := status
+		nextStatus := incomingStatus
+		if rec.Status == "confirmed" && incomingStatus == "detected" {
+			nextStatus = rec.Status
+		}
+		rec.Status = nextStatus
+
+		switch incomingStatus {
+		case "confirmed":
+			rec.ConfirmedHeight = confirmedHeight
+		case "unconfirmed", "orphaned":
+			rec.ConfirmedHeight = nil
+		case "detected":
+			if nextStatus != "confirmed" {
+				rec.ConfirmedHeight = nil
+			}
+		}
 		rec.UpdatedAt = now
 		if rec.InvoiceID == "" && invoiceID != "" {
 			rec.InvoiceID = invoiceID

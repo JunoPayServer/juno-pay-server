@@ -154,6 +154,9 @@ type Store interface {
 	// Scan ingestion + invoice accounting.
 	ScanCursor(ctx context.Context, walletID string) (cursor int64, err error)
 	ApplyScanEvent(ctx context.Context, ev ScanEvent) error
+	// UpdateInvoiceConfirmations promotes pending deposits to "confirmed" based on the current chain tip height
+	// and each invoice's RequiredConfirmations value.
+	UpdateInvoiceConfirmations(ctx context.Context, bestHeight int64) error
 
 	// Invoice events (for polling and SSE).
 	ListInvoiceEvents(ctx context.Context, invoiceID string, afterID int64, limit int) (events []domain.InvoiceEvent, nextCursor int64, err error)

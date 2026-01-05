@@ -174,6 +174,20 @@ func main() {
 			if err := ing.Sync(context.Background()); err != nil {
 				log.Printf("scan sync error: %v", err)
 			}
+			func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+
+				bestHeight, err := jcd.GetBlockCount(ctx)
+				if err != nil {
+					log.Printf("getblockcount error: %v", err)
+					return
+				}
+				if err := st.UpdateInvoiceConfirmations(ctx, bestHeight); err != nil {
+					log.Printf("update invoice confirmations error: %v", err)
+					return
+				}
+			}()
 			time.Sleep(pollInterval)
 		}
 	}()

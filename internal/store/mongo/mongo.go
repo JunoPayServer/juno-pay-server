@@ -1228,6 +1228,111 @@ func (s *Store) ApplyScanEvent(ctx context.Context, ev store.ScanEvent) error {
 	return err
 }
 
+func (s *Store) UpdateInvoiceConfirmations(ctx context.Context, bestHeight int64) error {
+	if s == nil || s.client == nil {
+		return errors.New("mongo: nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	session, err := s.client.StartSession()
+	if err != nil {
+		return err
+	}
+	defer session.EndSession(ctx)
+
+	_, err = session.WithTransaction(ctx, func(sessCtx mongo.SessionContext) (any, error) {
+		now := time.Now().UTC()
+		nowUnix := now.Unix()
+
+		cur, err := s.c("deposits").Find(sessCtx, bson.M{
+			"status": "detected",
+			"invoice_id": bson.M{
+				"$nin": []any{nil, ""},
+			},
+			"height": bson.M{"$lte": bestHeight},
+		})
+		if err != nil {
+			return nil, err
+		}
+		defer cur.Close(sessCtx)
+
+		affectedInvoices := make(map[string]struct{})
+		for cur.Next(sessCtx) {
+			var d struct {
+				WalletID    string `bson:"wallet_id"`
+				TxID        string `bson:"txid"`
+				ActionIndex int32  `bson:"action_index"`
+				AmountZat   int64  `bson:"amount_zat"`
+				Height      int64  `bson:"height"`
+				InvoiceID   string `bson:"invoice_id"`
+			}
+			if err := cur.Decode(&d); err != nil {
+				return nil, err
+			}
+			if strings.TrimSpace(d.InvoiceID) == "" {
+				continue
+			}
+
+			var inv struct {
+				RequiredConfirmations int32 `bson:"required_confirmations"`
+			}
+			if err := s.c("invoices").FindOne(sessCtx, bson.M{"_id": d.InvoiceID}).Decode(&inv); err != nil {
+				if errors.Is(err, mongo.ErrNoDocuments) {
+					continue
+				}
+				return nil, err
+			}
+
+			required := int64(inv.RequiredConfirmations)
+			if required <= 0 {
+				required = 1
+			}
+			if (bestHeight-d.Height+1) < required {
+				continue
+			}
+
+			confHeight := d.Height + required - 1
+			res, err := s.c("deposits").UpdateOne(
+				sessCtx,
+				bson.M{"wallet_id": d.WalletID, "txid": d.TxID, "action_index": d.ActionIndex, "status": "detected"},
+				bson.M{"$set": bson.M{"status": "confirmed", "confirmed_height": confHeight, "updated_at": nowUnix}},
+			)
+			if err != nil {
+				return nil, err
+			}
+			if res.ModifiedCount == 0 {
+				continue
+			}
+
+			depRef := &domain.DepositRef{
+				WalletID:    d.WalletID,
+				TxID:        d.TxID,
+				ActionIndex: d.ActionIndex,
+				AmountZat:   d.AmountZat,
+				Height:      d.Height,
+			}
+			if err := s.insertInvoiceEvent(sessCtx, d.InvoiceID, domain.InvoiceEventDepositConfirmed, now, depRef, nil); err != nil {
+				return nil, err
+			}
+			affectedInvoices[d.InvoiceID] = struct{}{}
+		}
+		if err := cur.Err(); err != nil {
+			return nil, err
+		}
+
+		for invoiceID := range affectedInvoices {
+			if err := s.recomputeInvoiceAggregates(sessCtx, invoiceID, now); err != nil {
+				return nil, err
+			}
+		}
+
+		return nil, nil
+	})
+	return err
+}
+
 func (s *Store) applyDepositEvent(sessCtx mongo.SessionContext, ev store.ScanEvent) error {
 	now := time.Now().UTC()
 
@@ -1266,9 +1371,9 @@ func (s *Store) applyDepositEvent(sessCtx mongo.SessionContext, ev store.ScanEve
 		recipientAddress = p.RecipientAddress
 		amountZat = int64(p.AmountZatoshis)
 		height = p.Height
-		status = "confirmed"
-		ch := p.ConfirmedHeight
-		confirmedHeight = &ch
+		// Note: do not mark deposits as confirmed here. Confirmation is per-invoice (required_confirmations)
+		// and is handled by UpdateInvoiceConfirmations based on chain tip height.
+		status = "detected"
 	case types.WalletEventKindDepositUnconfirmed:
 		var p types.DepositUnconfirmedPayload
 		if err := json.Unmarshal(ev.Payload, &p); err != nil {
@@ -1324,6 +1429,28 @@ func (s *Store) applyDepositEvent(sessCtx mongo.SessionContext, ev store.ScanEve
 	updatedAtUnix := now.Unix()
 
 	filter := bson.M{"wallet_id": walletID, "txid": txid, "action_index": actionIndex}
+	var existing struct {
+		Status          string `bson:"status"`
+		ConfirmedHeight *int64 `bson:"confirmed_height"`
+	}
+	if err := s.c("deposits").FindOne(sessCtx, filter).Decode(&existing); err != nil && !errors.Is(err, mongo.ErrNoDocuments) {
+		return err
+	}
+
+	incomingStatus := status
+	finalStatus := incomingStatus
+	finalConfirmedHeight := confirmedHeight
+	switch {
+	case existing.Status == "confirmed" && incomingStatus == "detected":
+		finalStatus = existing.Status
+		finalConfirmedHeight = existing.ConfirmedHeight
+	case incomingStatus == "unconfirmed" || incomingStatus == "orphaned":
+		finalConfirmedHeight = nil
+	case incomingStatus == "detected":
+		if finalStatus != "confirmed" {
+			finalConfirmedHeight = nil
+		}
+	}
 
 	depSeq, err := s.nextSeq(sessCtx, sessCtx, "deposit_seq")
 	if err != nil {
@@ -1336,8 +1463,8 @@ func (s *Store) applyDepositEvent(sessCtx mongo.SessionContext, ev store.ScanEve
 			"recipient_address_hash": addrHash,
 			"amount_zat":             amountZat,
 			"height":                 height,
-			"status":                 status,
-			"confirmed_height":       confirmedHeight,
+			"status":                 finalStatus,
+			"confirmed_height":       finalConfirmedHeight,
 			"updated_at":             updatedAtUnix,
 		},
 		"$setOnInsert": bson.M{
@@ -1404,7 +1531,7 @@ func (s *Store) applyDepositEvent(sessCtx mongo.SessionContext, ev store.ScanEve
 		AmountZat:   amountZat,
 		Height:      height,
 	}
-	switch status {
+	switch incomingStatus {
 	case "detected":
 		if err := s.insertInvoiceEvent(sessCtx, applyInvoiceID, domain.InvoiceEventDepositDetected, ev.OccurredAt.UTC(), depRef, nil); err != nil {
 			return err
@@ -1414,13 +1541,26 @@ func (s *Store) applyDepositEvent(sessCtx mongo.SessionContext, ev store.ScanEve
 			return err
 		}
 	}
+	return s.recomputeInvoiceAggregates(sessCtx, applyInvoiceID, now)
+}
+
+func (s *Store) recomputeInvoiceAggregates(sessCtx mongo.SessionContext, invoiceID string, now time.Time) error {
+	invoiceID = strings.TrimSpace(invoiceID)
+	if invoiceID == "" {
+		return nil
+	}
+	now = now.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	updatedAtUnix := now.Unix()
 
 	// Recompute invoice aggregates from deposits.
-	pendingSum, err := s.sumDeposits(sessCtx, applyInvoiceID, []string{"detected", "unconfirmed"})
+	pendingSum, err := s.sumDeposits(sessCtx, invoiceID, []string{"detected", "unconfirmed"})
 	if err != nil {
 		return err
 	}
-	confirmedSum, err := s.sumDeposits(sessCtx, applyInvoiceID, []string{"confirmed"})
+	confirmedSum, err := s.sumDeposits(sessCtx, invoiceID, []string{"confirmed"})
 	if err != nil {
 		return err
 	}
@@ -1436,14 +1576,14 @@ func (s *Store) applyDepositEvent(sessCtx mongo.SessionContext, ev store.ScanEve
 			Overpayment    string `bson:"overpayment"`
 		} `bson:"policies"`
 	}
-	if err := s.c("invoices").FindOne(sessCtx, bson.M{"_id": applyInvoiceID}).Decode(&invDoc); err != nil {
+	if err := s.c("invoices").FindOne(sessCtx, bson.M{"_id": invoiceID}).Decode(&invDoc); err != nil {
 		return err
 	}
 
 	expired := invDoc.ExpiresAt != nil && now.Unix() > *invDoc.ExpiresAt
 	newStatus := computeInvoiceStatusSQL(invDoc.AmountZat, pendingSum, confirmedSum, expired, domain.LatePaymentPolicy(invDoc.Policies.LatePayment))
 
-	_, err = s.c("invoices").UpdateOne(sessCtx, bson.M{"_id": applyInvoiceID}, bson.M{
+	_, err = s.c("invoices").UpdateOne(sessCtx, bson.M{"_id": invoiceID}, bson.M{
 		"$set": bson.M{
 			"received_pending_zat":   pendingSum,
 			"received_confirmed_zat": confirmedSum,
@@ -1458,20 +1598,20 @@ func (s *Store) applyDepositEvent(sessCtx mongo.SessionContext, ev store.ScanEve
 	if newStatus != domain.InvoiceStatus(invDoc.Status) {
 		switch newStatus {
 		case domain.InvoiceExpired:
-			if err := s.insertInvoiceEvent(sessCtx, applyInvoiceID, domain.InvoiceEventInvoiceExpired, now, nil, nil); err != nil {
+			if err := s.insertInvoiceEvent(sessCtx, invoiceID, domain.InvoiceEventInvoiceExpired, now, nil, nil); err != nil {
 				return err
 			}
 		case domain.InvoiceConfirmed, domain.InvoicePaidLate:
-			if err := s.insertInvoiceEvent(sessCtx, applyInvoiceID, domain.InvoiceEventInvoicePaid, now, nil, nil); err != nil {
+			if err := s.insertInvoiceEvent(sessCtx, invoiceID, domain.InvoiceEventInvoicePaid, now, nil, nil); err != nil {
 				return err
 			}
 		case domain.InvoiceOverpaid:
-			if err := s.insertInvoiceEvent(sessCtx, applyInvoiceID, domain.InvoiceEventInvoiceOverpaid, now, nil, nil); err != nil {
+			if err := s.insertInvoiceEvent(sessCtx, invoiceID, domain.InvoiceEventInvoiceOverpaid, now, nil, nil); err != nil {
 				return err
 			}
 		}
 
-		invID := applyInvoiceID
+		invID := invoiceID
 		switch {
 		case newStatus == domain.InvoicePartialConfirmed && domain.PartialPaymentPolicy(invDoc.Policies.PartialPayment) == domain.PartialPaymentReject:
 			if err := s.createReviewCase(sessCtx, invDoc.MerchantID, &invID, domain.ReviewPartialPayment, "partial payment requires review", "", "", 0); err != nil {

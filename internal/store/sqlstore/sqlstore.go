@@ -1084,6 +1084,123 @@ func (s *Store) ApplyScanEvent(ctx context.Context, ev store.ScanEvent) error {
 	return tx.Commit()
 }
 
+func (s *Store) UpdateInvoiceConfirmations(ctx context.Context, bestHeight int64) error {
+	if s == nil || s.db == nil {
+		return errors.New("sqlite: nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	now := time.Now().UTC()
+	nowUnix := now.Unix()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx, s.q(`
+		SELECT d.wallet_id, d.txid, d.action_index, d.amount_zat, d.height, d.invoice_id, i.required_confirmations
+		FROM deposits d
+		JOIN invoices i ON i.invoice_id = d.invoice_id
+		WHERE d.status = 'detected'
+		  AND d.invoice_id IS NOT NULL
+		  AND d.invoice_id <> ''
+		  AND d.height <= ?
+	`), bestHeight)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type dep struct {
+		InvoiceID   string
+		WalletID    string
+		TxID        string
+		ActionIndex int32
+		AmountZat   int64
+		Height      int64
+		ConfHeight  int64
+	}
+
+	toConfirm := make([]dep, 0, 128)
+	for rows.Next() {
+		var (
+			walletID    string
+			txid        string
+			actionIndex int32
+			amountZat   int64
+			height      int64
+			invoiceID   string
+			reqConfs    int32
+		)
+		if err := rows.Scan(&walletID, &txid, &actionIndex, &amountZat, &height, &invoiceID, &reqConfs); err != nil {
+			return err
+		}
+
+		required := int64(reqConfs)
+		if required <= 0 {
+			required = 1
+		}
+		if (bestHeight-height+1) < required {
+			continue
+		}
+
+		toConfirm = append(toConfirm, dep{
+			InvoiceID:   invoiceID,
+			WalletID:    walletID,
+			TxID:        txid,
+			ActionIndex: actionIndex,
+			AmountZat:   amountZat,
+			Height:      height,
+			ConfHeight:  height + required - 1,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	affectedInvoices := make(map[string]struct{}, 128)
+	for _, d := range toConfirm {
+		res, err := tx.ExecContext(ctx, s.q(`
+			UPDATE deposits
+			SET status = 'confirmed',
+			    confirmed_height = ?,
+			    updated_at = ?
+			WHERE wallet_id = ? AND txid = ? AND action_index = ? AND status = 'detected'
+		`), d.ConfHeight, nowUnix, d.WalletID, d.TxID, d.ActionIndex)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			continue
+		}
+
+		depRef := &domain.DepositRef{
+			WalletID:    d.WalletID,
+			TxID:        d.TxID,
+			ActionIndex: d.ActionIndex,
+			AmountZat:   d.AmountZat,
+			Height:      d.Height,
+		}
+		if err := s.insertInvoiceEventTx(ctx, tx, d.InvoiceID, domain.InvoiceEventDepositConfirmed, now, depRef, nil); err != nil {
+			return err
+		}
+
+		affectedInvoices[d.InvoiceID] = struct{}{}
+	}
+
+	for invoiceID := range affectedInvoices {
+		if err := s.recomputeInvoiceAggregatesTx(ctx, tx, invoiceID, now); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
 func (s *Store) ListInvoiceEvents(ctx context.Context, invoiceID string, afterID int64, limit int) (events []domain.InvoiceEvent, nextCursor int64, err error) {
 	invoiceID = strings.TrimSpace(invoiceID)
 	if invoiceID == "" {
@@ -2365,7 +2482,6 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 		amountZat        int64
 		height           int64
 		status           string
-		confirmedHeight  *int64
 	)
 
 	switch types.WalletEventKind(ev.Kind) {
@@ -2392,9 +2508,9 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 		recipientAddress = p.RecipientAddress
 		amountZat = int64(p.AmountZatoshis)
 		height = p.Height
-		status = "confirmed"
-		ch := p.ConfirmedHeight
-		confirmedHeight = &ch
+		// Note: do not mark deposits as confirmed here. Confirmation is per-invoice (required_confirmations)
+		// and is handled by UpdateInvoiceConfirmations based on chain tip height.
+		status = "detected"
 	case types.WalletEventKindDepositUnconfirmed:
 		var p types.DepositUnconfirmedPayload
 		if err := json.Unmarshal(ev.Payload, &p); err != nil {
@@ -2425,6 +2541,7 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 
 	addr := strings.ToLower(strings.TrimSpace(recipientAddress))
 	addrHash := hash32Bytes(addr)
+	clearConfirmedHeight := status == "unconfirmed" || status == "orphaned"
 
 	// Find invoice by address (if any).
 	var invoiceID sql.NullString
@@ -2450,10 +2567,6 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 	}
 	updatedAtUnix := now.Unix()
 
-	var confirmedHeightAny any = nil
-	if confirmedHeight != nil {
-		confirmedHeightAny = *confirmedHeight
-	}
 	var invoiceIDAny any = nil
 	if applyInvoiceID != "" {
 		invoiceIDAny = applyInvoiceID
@@ -2465,13 +2578,22 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 		    recipient_address_hash = ?,
 		    amount_zat = ?,
 		    height = ?,
-		    status = ?,
-		    confirmed_height = ?,
+		    status = CASE
+		      WHEN status = 'confirmed' AND ? = 'detected' THEN status
+		      ELSE ?
+		    END,
+		    confirmed_height = CASE
+		      WHEN ? THEN NULL
+		      ELSE confirmed_height
+		    END,
 		    invoice_id = COALESCE(invoice_id, ?),
 		    updated_at = ?
 		WHERE wallet_id = ? AND txid = ? AND action_index = ?
 	`),
-		addr, addrHash, amountZat, height, status, confirmedHeightAny, invoiceIDAny, updatedAtUnix,
+		addr, addrHash, amountZat, height,
+		status, status,
+		clearConfirmedHeight,
+		invoiceIDAny, updatedAtUnix,
 		walletID, txid, actionIndex,
 	)
 	if err != nil {
@@ -2485,7 +2607,7 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 				status, confirmed_height, invoice_id,
 				detected_at, updated_at
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`), walletID, txid, actionIndex, addr, addrHash, amountZat, height, status, confirmedHeightAny, invoiceIDAny, detectedAtUnix, updatedAtUnix)
+		`), walletID, txid, actionIndex, addr, addrHash, amountZat, height, status, nil, invoiceIDAny, detectedAtUnix, updatedAtUnix)
 		if err != nil {
 			return err
 		}
@@ -2497,13 +2619,22 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 				    recipient_address_hash = ?,
 				    amount_zat = ?,
 				    height = ?,
-				    status = ?,
-				    confirmed_height = ?,
+				    status = CASE
+				      WHEN status = 'confirmed' AND ? = 'detected' THEN status
+				      ELSE ?
+				    END,
+				    confirmed_height = CASE
+				      WHEN ? THEN NULL
+				      ELSE confirmed_height
+				    END,
 				    invoice_id = COALESCE(invoice_id, ?),
 				    updated_at = ?
 				WHERE wallet_id = ? AND txid = ? AND action_index = ?
 			`),
-				addr, addrHash, amountZat, height, status, confirmedHeightAny, invoiceIDAny, updatedAtUnix,
+				addr, addrHash, amountZat, height,
+				status, status,
+				clearConfirmedHeight,
+				invoiceIDAny, updatedAtUnix,
 				walletID, txid, actionIndex,
 			); err != nil {
 				return err
@@ -2583,13 +2714,32 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 		}
 	}
 
+	return s.recomputeInvoiceAggregatesTx(ctx, tx, applyInvoiceID, now)
+}
+
+func (s *Store) recomputeInvoiceAggregatesTx(ctx context.Context, tx *sql.Tx, invoiceID string, now time.Time) error {
+	if tx == nil {
+		return errors.New("sqlite: nil tx")
+	}
+	invoiceID = strings.TrimSpace(invoiceID)
+	if invoiceID == "" {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	updatedAtUnix := now.Unix()
+
 	// Recompute invoice aggregates.
 	var pendingSum int64
 	if err := tx.QueryRowContext(ctx, s.q(`
 		SELECT COALESCE(SUM(amount_zat), 0)
 		FROM deposits
 		WHERE invoice_id = ? AND status IN ('detected','unconfirmed')
-	`), applyInvoiceID).Scan(&pendingSum); err != nil {
+	`), invoiceID).Scan(&pendingSum); err != nil {
 		return err
 	}
 	var confirmedSum int64
@@ -2597,7 +2747,7 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 		SELECT COALESCE(SUM(amount_zat), 0)
 		FROM deposits
 		WHERE invoice_id = ? AND status = 'confirmed'
-	`), applyInvoiceID).Scan(&confirmedSum); err != nil {
+	`), invoiceID).Scan(&confirmedSum); err != nil {
 		return err
 	}
 
@@ -2614,21 +2764,21 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 		SELECT merchant_id, amount_zat, status, expires_at, policy_late_payment, policy_partial_payment, policy_overpayment
 		FROM invoices
 		WHERE invoice_id = ?
-	`), applyInvoiceID).Scan(&invMerchantID, &invAmount, &invStatus, &invExpires, &invLatePolicy, &invPartial, &invOverpay); err != nil {
+	`), invoiceID).Scan(&invMerchantID, &invAmount, &invStatus, &invExpires, &invLatePolicy, &invPartial, &invOverpay); err != nil {
 		return err
 	}
 
 	expired := invExpires.Valid && now.Unix() > invExpires.Int64
 	newStatus := computeInvoiceStatusSQL(invAmount, pendingSum, confirmedSum, expired, domain.LatePaymentPolicy(invLatePolicy))
 
-	_, err = tx.ExecContext(ctx, s.q(`
+	_, err := tx.ExecContext(ctx, s.q(`
 		UPDATE invoices
 		SET received_pending_zat = ?,
 		    received_confirmed_zat = ?,
 		    status = ?,
 		    updated_at = ?
 		WHERE invoice_id = ?
-	`), pendingSum, confirmedSum, string(newStatus), updatedAtUnix, applyInvoiceID)
+	`), pendingSum, confirmedSum, string(newStatus), updatedAtUnix, invoiceID)
 	if err != nil {
 		return err
 	}
@@ -2636,20 +2786,20 @@ func (s *Store) applyDepositEventTx(ctx context.Context, tx *sql.Tx, ev store.Sc
 	if newStatus != domain.InvoiceStatus(invStatus) {
 		switch newStatus {
 		case domain.InvoiceExpired:
-			if err := s.insertInvoiceEventTx(ctx, tx, applyInvoiceID, domain.InvoiceEventInvoiceExpired, now, nil, nil); err != nil {
+			if err := s.insertInvoiceEventTx(ctx, tx, invoiceID, domain.InvoiceEventInvoiceExpired, now, nil, nil); err != nil {
 				return err
 			}
 		case domain.InvoiceConfirmed, domain.InvoicePaidLate:
-			if err := s.insertInvoiceEventTx(ctx, tx, applyInvoiceID, domain.InvoiceEventInvoicePaid, now, nil, nil); err != nil {
+			if err := s.insertInvoiceEventTx(ctx, tx, invoiceID, domain.InvoiceEventInvoicePaid, now, nil, nil); err != nil {
 				return err
 			}
 		case domain.InvoiceOverpaid:
-			if err := s.insertInvoiceEventTx(ctx, tx, applyInvoiceID, domain.InvoiceEventInvoiceOverpaid, now, nil, nil); err != nil {
+			if err := s.insertInvoiceEventTx(ctx, tx, invoiceID, domain.InvoiceEventInvoiceOverpaid, now, nil, nil); err != nil {
 				return err
 			}
 		}
 
-		invID := applyInvoiceID
+		invID := invoiceID
 		switch {
 		case newStatus == domain.InvoicePartialConfirmed && domain.PartialPaymentPolicy(invPartial) == domain.PartialPaymentReject:
 			reviewID, err := newID("rev")
