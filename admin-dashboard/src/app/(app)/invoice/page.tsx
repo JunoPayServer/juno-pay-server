@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { ErrorBanner } from "@/components/ErrorBanner";
-import { APIError, type Invoice, getInvoice } from "@/lib/api";
+import { APIError, type InvoiceDetails, getInvoice } from "@/lib/api";
 
 function Row({ label, value }: { label: string; value: React.ReactNode }) {
   return (
@@ -16,7 +16,7 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
 
 export default function InvoiceDetailPage() {
   const [invoiceID, setInvoiceID] = useState("");
-  const [inv, setInv] = useState<Invoice | null>(null);
+  const [inv, setInv] = useState<InvoiceDetails | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -79,12 +79,26 @@ export default function InvoiceDetailPage() {
         <div className="mt-3">
           <Row label="Merchant ID" value={<span className="font-mono text-xs">{inv.merchant_id}</span>} />
           <Row label="Status" value={inv.status} />
+          <Row label="External Order ID" value={<span className="font-mono text-xs break-all">{inv.external_order_id}</span>} />
+          <Row label="Wallet ID" value={<span className="font-mono text-xs break-all">{inv.wallet_id}</span>} />
+          <Row label="Address Index" value={inv.address_index} />
+          <Row label="Created After Height" value={inv.created_after_height} />
+          <Row label="Created After Hash" value={<span className="font-mono text-xs break-all">{inv.created_after_hash}</span>} />
           <Row label="Address" value={<span className="font-mono text-xs break-all">{inv.address}</span>} />
           <Row label="Amount (zat)" value={inv.amount_zat} />
           <Row label="Received Pending (zat)" value={inv.received_zat_pending} />
           <Row label="Received Confirmed (zat)" value={inv.received_zat_confirmed} />
           <Row label="Required Confirmations" value={inv.required_confirmations} />
+          <Row
+            label="Policies"
+            value={
+              <span className="font-mono text-xs">
+                late={inv.policies.late_payment_policy} partial={inv.policies.partial_payment_policy} overpay={inv.policies.overpayment_policy}
+              </span>
+            }
+          />
           <Row label="Expires At" value={inv.expires_at ?? "—"} />
+          <Row label="Created At" value={inv.created_at} />
           <Row label="Updated At" value={inv.updated_at} />
         </div>
       </section>

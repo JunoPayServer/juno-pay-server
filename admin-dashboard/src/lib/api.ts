@@ -148,6 +148,13 @@ export type Invoice = {
   expires_at: string | null;
   created_at: string;
   updated_at: string;
+};
+
+export type InvoiceDetails = Invoice & {
+  wallet_id: string;
+  address_index: number;
+  created_after_height: number;
+  created_after_hash: string;
   policies: {
     late_payment_policy: string;
     partial_payment_policy: string;
@@ -312,8 +319,8 @@ export function listInvoices(params?: { merchant_id?: string; status?: string; e
   return fetchJSON<{ invoices: Invoice[]; next_cursor: string }>(`/v1/admin/invoices${q ? `?${q}` : ""}`);
 }
 
-export function getInvoice(invoiceId: string): Promise<Invoice> {
-  return fetchJSON<Invoice>(`/v1/admin/invoices/${encodeURIComponent(invoiceId)}`);
+export function getInvoice(invoiceId: string): Promise<InvoiceDetails> {
+  return fetchJSON<InvoiceDetails>(`/v1/admin/invoices/${encodeURIComponent(invoiceId)}`);
 }
 
 export function listDeposits(params?: { merchant_id?: string; invoice_id?: string; txid?: string; cursor?: string; limit?: string }): Promise<{ deposits: Deposit[]; next_cursor: string }> {

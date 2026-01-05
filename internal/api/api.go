@@ -690,6 +690,20 @@ func toInvoiceJSON(inv domain.Invoice) map[string]any {
 	}
 }
 
+func toAdminInvoiceJSON(inv domain.Invoice) map[string]any {
+	out := toInvoiceJSON(inv)
+	out["wallet_id"] = inv.WalletID
+	out["address_index"] = inv.AddressIndex
+	out["created_after_height"] = inv.CreatedAfterHeight
+	out["created_after_hash"] = inv.CreatedAfterHash
+	out["policies"] = map[string]any{
+		"late_payment_policy":    string(inv.Policies.LatePayment),
+		"partial_payment_policy": string(inv.Policies.PartialPayment),
+		"overpayment_policy":     string(inv.Policies.Overpayment),
+	}
+	return out
+}
+
 func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet && s.adminUI != nil {
 		http.Redirect(w, r, "/admin/login/", http.StatusTemporaryRedirect)
@@ -1790,7 +1804,7 @@ func (s *Server) handleAdminInvoiceSubroutes(w http.ResponseWriter, r *http.Requ
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "ok",
-		"data":   toInvoiceJSON(inv),
+		"data":   toAdminInvoiceJSON(inv),
 	})
 }
 
