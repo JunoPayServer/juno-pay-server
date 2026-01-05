@@ -62,7 +62,7 @@ func TestPayServer_DepositFlow_E2E(t *testing.T) {
 		"-rpc-pass", jd.RPCPassword,
 		"-ua-hrp", uaHRP,
 		"-poll-interval", "100ms",
-		"-confirmations", "1",
+		"-confirmations", "100",
 	}, nil)
 	if err != nil {
 		t.Fatalf("StartProcess(juno-scan): %v", err)
@@ -149,7 +149,7 @@ func TestPayServer_DepositFlow_E2E(t *testing.T) {
 		t.Fatalf("scanclient.New: %v", err)
 	}
 	mustWaitForScanEventKind(t, ctx, sc, "w1", "DepositEvent")
-	mustWaitForScanEventKind(t, ctx, sc, "w1", "DepositConfirmed")
+	mustCLI(t, ctx, jd, "generate", "4") // merchant required_confirmations=5
 
 	mustWaitInvoiceConfirmed(t, ctx, payURL, invoiceID, invoiceToken, 1_000_000)
 }
@@ -249,7 +249,7 @@ func mustAdminCreateMerchant(t *testing.T, ctx context.Context, c *http.Client, 
 		"name": name,
 		"settings": map[string]any{
 			"invoice_ttl_seconds":    900,
-			"required_confirmations": 1,
+			"required_confirmations": 5,
 			"policies": map[string]any{
 				"late_payment_policy":    "manual_review",
 				"partial_payment_policy": "accept_partial",

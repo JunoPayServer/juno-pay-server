@@ -472,6 +472,9 @@ func runConformanceSuite(t *testing.T, newStore func(t *testing.T) store.Store) 
 		}); err != nil {
 			t.Fatalf("ApplyScanEvent: %v", err)
 		}
+		if err := st.UpdateInvoiceConfirmations(ctx, 1); err != nil {
+			t.Fatalf("UpdateInvoiceConfirmations: %v", err)
+		}
 
 		page1, cur1, err := st.ListInvoices(ctx, store.InvoiceFilter{MerchantID: m.MerchantID, AfterID: 0, Limit: 1})
 		if err != nil {
@@ -982,6 +985,9 @@ func runConformanceSuite(t *testing.T, newStore func(t *testing.T) store.Store) 
 			OccurredAt: time.Now().UTC(),
 		}); err != nil {
 			t.Fatalf("ApplyScanEvent late: %v", err)
+		}
+		if err := st.UpdateInvoiceConfirmations(ctx, 1); err != nil {
+			t.Fatalf("UpdateInvoiceConfirmations: %v", err)
 		}
 
 		cs, err := st.ListReviewCases(ctx, store.ReviewCaseFilter{MerchantID: m.MerchantID, Status: domain.ReviewOpen})

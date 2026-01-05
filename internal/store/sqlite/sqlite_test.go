@@ -304,6 +304,9 @@ func TestStore_ListInvoices_FilterAndCursor(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ApplyScanEvent: %v", err)
 	}
+	if err := s.UpdateInvoiceConfirmations(ctx, 1); err != nil {
+		t.Fatalf("UpdateInvoiceConfirmations: %v", err)
+	}
 
 	page1, cur1, err := s.ListInvoices(ctx, store.InvoiceFilter{MerchantID: m.MerchantID, AfterID: 0, Limit: 1})
 	if err != nil {
@@ -906,6 +909,9 @@ func TestStore_ReviewCases_FromInvoicePolicies(t *testing.T) {
 		OccurredAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("ApplyScanEvent late: %v", err)
+	}
+	if err := s.UpdateInvoiceConfirmations(ctx, 1); err != nil {
+		t.Fatalf("UpdateInvoiceConfirmations: %v", err)
 	}
 
 	cs, err := s.ListReviewCases(ctx, store.ReviewCaseFilter{MerchantID: m.MerchantID, Status: domain.ReviewOpen})

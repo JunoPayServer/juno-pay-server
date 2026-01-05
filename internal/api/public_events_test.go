@@ -173,6 +173,9 @@ func TestPublicInvoice_EventsAndAccounting(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ApplyScanEvent confirm: %v", err)
 	}
+	if err := st.UpdateInvoiceConfirmations(ctx, 102); err != nil {
+		t.Fatalf("UpdateInvoiceConfirmations: %v", err)
+	}
 
 	// Invoice should now be paid.
 	invReq := httptest.NewRequest(http.MethodGet, "/v1/public/invoices/"+invoiceID+"?token="+token, nil)

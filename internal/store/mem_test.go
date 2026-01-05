@@ -389,6 +389,9 @@ func TestMemStore_ListInvoices_FilterAndCursor(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ApplyScanEvent: %v", err)
 	}
+	if err := st.UpdateInvoiceConfirmations(ctx, 1); err != nil {
+		t.Fatalf("UpdateInvoiceConfirmations: %v", err)
+	}
 
 	// Cursor paging (m1 only).
 	page1, cur1, err := st.ListInvoices(ctx, InvoiceFilter{MerchantID: m1.MerchantID, AfterID: 0, Limit: 1})
@@ -546,6 +549,104 @@ func TestMemStore_ListDeposits_FilterAndCursor(t *testing.T) {
 	}
 	if len(onlyInv) != 1 || onlyInv[0].TxID != "tx1" {
 		t.Fatalf("expected only tx1 for invoice_id filter")
+	}
+}
+
+func TestMemStore_UpdateInvoiceConfirmations_UsesInvoiceRequiredConfirmations(t *testing.T) {
+	st := NewMem()
+	ctx := context.Background()
+
+	m, err := st.CreateMerchant(ctx, "acme", domain.MerchantSettings{
+		InvoiceTTLSeconds:     0,
+		RequiredConfirmations: 5,
+		Policies: domain.InvoicePolicies{
+			LatePayment:    domain.LatePaymentMarkPaidLate,
+			PartialPayment: domain.PartialPaymentAccept,
+			Overpayment:    domain.OverpaymentMarkOverpaid,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateMerchant: %v", err)
+	}
+	if _, err := st.SetMerchantWallet(ctx, m.MerchantID, MerchantWallet{
+		WalletID: "w1",
+		UFVK:     "jview1test",
+		Chain:    "mainnet",
+		UAHRP:    "j",
+		CoinType: 8133,
+	}); err != nil {
+		t.Fatalf("SetMerchantWallet: %v", err)
+	}
+
+	inv, _, err := st.CreateInvoice(ctx, InvoiceCreate{
+		MerchantID:            m.MerchantID,
+		ExternalOrderID:       "order-1",
+		WalletID:              "w1",
+		AddressIndex:          0,
+		Address:               "j1addr",
+		CreatedAfterHeight:    0,
+		CreatedAfterHash:      "h0",
+		AmountZat:             10,
+		RequiredConfirmations: 5,
+		Policies:              m.Settings.Policies,
+	})
+	if err != nil {
+		t.Fatalf("CreateInvoice: %v", err)
+	}
+
+	p := types.DepositEventPayload{
+		DepositEvent: types.DepositEvent{
+			WalletID:       "w1",
+			TxID:           "tx1",
+			Height:         10,
+			ActionIndex:    0,
+			AmountZatoshis: 10,
+		},
+		RecipientAddress: "j1addr",
+	}
+	b, _ := json.Marshal(p)
+	if err := st.ApplyScanEvent(ctx, ScanEvent{
+		WalletID:   "w1",
+		Cursor:     1,
+		Kind:       string(types.WalletEventKindDepositEvent),
+		Payload:    b,
+		OccurredAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("ApplyScanEvent: %v", err)
+	}
+
+	if err := st.UpdateInvoiceConfirmations(ctx, 13); err != nil {
+		t.Fatalf("UpdateInvoiceConfirmations: %v", err)
+	}
+	got, ok, err := st.GetInvoice(ctx, inv.InvoiceID)
+	if err != nil {
+		t.Fatalf("GetInvoice: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected invoice to exist")
+	}
+	if got.Status != domain.InvoicePending {
+		t.Fatalf("expected status pending, got %q", got.Status)
+	}
+	if got.ReceivedConfirmedZat != 0 {
+		t.Fatalf("expected received_confirmed_zat=0, got %d", got.ReceivedConfirmedZat)
+	}
+
+	if err := st.UpdateInvoiceConfirmations(ctx, 14); err != nil {
+		t.Fatalf("UpdateInvoiceConfirmations: %v", err)
+	}
+	got2, ok, err := st.GetInvoice(ctx, inv.InvoiceID)
+	if err != nil {
+		t.Fatalf("GetInvoice: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected invoice to exist")
+	}
+	if got2.Status != domain.InvoiceConfirmed {
+		t.Fatalf("expected status confirmed, got %q", got2.Status)
+	}
+	if got2.ReceivedConfirmedZat != 10 {
+		t.Fatalf("expected received_confirmed_zat=10, got %d", got2.ReceivedConfirmedZat)
 	}
 }
 
@@ -917,6 +1018,9 @@ func TestMemStore_ReviewCases_FromInvoicePolicies(t *testing.T) {
 		OccurredAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("ApplyScanEvent late: %v", err)
+	}
+	if err := st.UpdateInvoiceConfirmations(ctx, 1); err != nil {
+		t.Fatalf("UpdateInvoiceConfirmations: %v", err)
 	}
 
 	cs, err := st.ListReviewCases(ctx, ReviewCaseFilter{MerchantID: m.MerchantID, Status: domain.ReviewOpen})
