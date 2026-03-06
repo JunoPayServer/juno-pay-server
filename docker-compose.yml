@@ -2,12 +2,12 @@ services:
   junocashd:
     container_name: juno-pay-server-junocashd
     platform: linux/amd64
-    image: juno-pay-server/junocashd:${JUNOCASH_VERSION:-0.9.8}
+    image: juno-pay-server/junocashd:${JUNOCASH_VERSION:-0.9.9}
     build:
       context: .
       dockerfile: docker/junocashd/Dockerfile
       args:
-        JUNOCASH_VERSION: ${JUNOCASH_VERSION:-0.9.8}
+        JUNOCASH_VERSION: ${JUNOCASH_VERSION:-0.9.9}
     environment:
       JUNO_CHAIN: ${JUNO_CHAIN:-regtest}
       JUNO_DATADIR: /data
@@ -38,13 +38,13 @@ services:
   juno-scan:
     container_name: juno-pay-server-scan
     platform: linux/amd64
-    image: juno-pay-server/juno-scan:${JUNO_SCAN_REF:-main}
+    image: juno-pay-server/juno-scan:${JUNO_SCAN_REF:-8e40d26577be1e946823ab3f380be5baf8a1dccd}
     build:
       context: .
       dockerfile: docker/juno-scan/Dockerfile
       args:
-        JUNO_SCAN_REPO: ${JUNO_SCAN_REPO:-https://github.com/Abdullah1738/juno-scan.git}
-        JUNO_SCAN_REF: ${JUNO_SCAN_REF:-main}
+        JUNO_SCAN_REPO: ${JUNO_SCAN_REPO:-https://github.com/junocash-tools/juno-scan.git}
+        JUNO_SCAN_REF: ${JUNO_SCAN_REF:-8e40d26577be1e946823ab3f380be5baf8a1dccd}
     depends_on:
       junocashd:
         condition: service_healthy

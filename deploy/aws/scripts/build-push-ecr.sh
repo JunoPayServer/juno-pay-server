@@ -18,8 +18,8 @@ REGION=""
 NAME_PREFIX="juno-pay"
 TAG=""
 STABLE_TAG="prod"
-JUNO_SCAN_REPO="https://github.com/Abdullah1738/juno-scan.git"
-JUNO_SCAN_REF="main"
+JUNO_SCAN_REPO="https://github.com/junocash-tools/juno-scan.git"
+JUNO_SCAN_REF="8e40d26577be1e946823ab3f380be5baf8a1dccd"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

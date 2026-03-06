@@ -1,7 +1,7 @@
 FROM --platform=linux/amd64 rust:1.86-bookworm AS rust-build
 
-ARG JUNO_SCAN_REPO=https://github.com/Abdullah1738/juno-scan.git
-ARG JUNO_SCAN_REF=main
+ARG JUNO_SCAN_REPO=https://github.com/junocash-tools/juno-scan.git
+ARG JUNO_SCAN_REF=8e40d26577be1e946823ab3f380be5baf8a1dccd
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
