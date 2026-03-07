@@ -30,11 +30,11 @@ on:
       juno_scan_repo:
         description: Git repo URL for juno-scan build
         required: true
-        default: https://github.com/Abdullah1738/juno-scan.git
+        default: https://github.com/junocash-tools/juno-scan.git
       juno_scan_ref:
         description: Git ref for juno-scan build
         required: true
-        default: main
+        default: 8e40d26577be1e946823ab3f380be5baf8a1dccd
       tag:
         description: "Docker tag (default: short sha)"
         required: false
