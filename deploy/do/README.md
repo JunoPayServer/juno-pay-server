@@ -32,6 +32,8 @@ deploy/do/scripts/describe-live-resources.sh
 
 Cutover and data-migration steps live in `deploy/do/CUTOVER.md`.
 
+AWS source-access recovery and legacy reference material live in `deploy/aws/README.md`.
+
 ## Account constraint observed
 
 The original plan called for a `250 GiB` volume. The current DigitalOcean account rejected that size during implementation and accepted `100 GiB` instead.
@@ -130,6 +132,21 @@ To stream the mutable data directories from the current AWS host to the DO host 
 deploy/do/scripts/sync-state-stream.sh \
   --source-host 18.206.49.27 \
   --target-host 159.203.150.96
+```
+
+To compare the current AWS production state against the DO staging state after each warm sync:
+
+```bash
+deploy/do/scripts/check-cutover-readiness.sh \
+  --service-token-file tmp/cloudflare-access-service-token.json
+```
+
+If you also want the synthetic invoice create/public fetch check in the same run, provide a merchant API key:
+
+```bash
+deploy/do/scripts/check-cutover-readiness.sh \
+  --service-token-file tmp/cloudflare-access-service-token.json \
+  --merchant-api-key <merchant-api-key>
 ```
 
 ## GitHub Actions deployment

@@ -78,6 +78,18 @@ Current traffic posture:
 - production traffic stays on AWS until the final maintenance window
 - DO is monitored as healthy standby only
 
+To verify or change the primary pool with the current global-key fallback:
+
+```bash
+deploy/cloudflare/scripts/switch-lb-primary.sh --target aws --dry-run
+```
+
+For the final cutover, promote DO and remove AWS from active failover:
+
+```bash
+deploy/cloudflare/scripts/switch-lb-primary.sh --target do --exclusive
+```
+
 ## Remaining Cloudflare caveat
 
 The remaining Cloudflare gap is connector-only:

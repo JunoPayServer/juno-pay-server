@@ -125,6 +125,7 @@ Primary migration target:
 
 - DigitalOcean host infrastructure and GHCR-based deployment: `deploy/do/`
 - Cloudflare DNS / migration notes: `deploy/cloudflare/`
+- AWS source-host recovery and legacy reference: `deploy/aws/`
 
 Current production migration shape:
 

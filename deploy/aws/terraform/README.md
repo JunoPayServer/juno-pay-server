@@ -1,5 +1,7 @@
 # AWS reference deployment (Terraform)
 
+AWS is legacy-only for this repo now. Use this Terraform stack as rollback or historical reference only while the DO migration is in flight.
+
 This folder contains a **reference** Terraform stack for running:
 
 - `junocashd` (Docker)

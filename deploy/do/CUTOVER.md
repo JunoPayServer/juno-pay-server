@@ -13,6 +13,12 @@ This runbook assumes:
 - Cloudflare Load Balancing is already live with AWS active and DO as healthy standby.
 - The remaining blocker before cutover is verified shell access to the AWS source host for the warm sync.
 
+Supporting operator tools:
+
+- source-host access verification: `deploy/aws/scripts/check-source-access.sh`
+- post-sync readiness comparison: `deploy/do/scripts/check-cutover-readiness.sh`
+- Cloudflare LB primary switch: `deploy/cloudflare/scripts/switch-lb-primary.sh`
+
 ## 1. Pre-stage the DO host
 
 1. Bootstrap the host.
@@ -62,6 +68,18 @@ This copies:
 
 Warm sync requires source-host shell access. If the AWS host blocks SSH, restore temporary operator access before attempting the sync. Do not proceed to production cutover without a verified source access path.
 
+Use the scripted source access check instead of ad hoc SSH retries:
+
+```bash
+deploy/aws/scripts/check-source-access.sh \
+  --instance-id i-0fe82490b2e05db4e \
+  --security-group-id sg-0595fddf6f6561904 \
+  --instance-ip 18.206.49.27 \
+  --region us-east-1 \
+  --ssh-private-key ~/.ssh/id_ed25519 \
+  --use-ec2-instance-connect
+```
+
 Current source-host blocker observed during implementation:
 
 - port `22/tcp` was not open by default
@@ -72,6 +90,12 @@ Current source-host blocker observed during implementation:
 Resolve the source-host access path before scheduling the cutover window.
 
 Repeat the warm sync until the final maintenance window.
+
+Recommended cadence:
+
+- run the first warm sync immediately after source access is restored
+- repeat every 24 hours until cutover
+- run an extra warm sync after any production-side change that affects mutable state
 
 ## 3. Validate staging
 
@@ -86,6 +110,15 @@ Before any production cutover:
 3. Confirm unauthenticated staging requests redirect to Access.
 4. Confirm the Access service token can reach staging.
 5. Confirm invoice creation, public invoice fetch, and webhook/status updates behave correctly.
+
+After each warm sync, run:
+
+```bash
+deploy/do/scripts/check-cutover-readiness.sh \
+  --service-token-file tmp/cloudflare-access-service-token.json
+```
+
+Add `--merchant-api-key <merchant-api-key>` when you want the scripted synthetic invoice create/public fetch check in the same run.
 
 ## 4. Final maintenance window
 
@@ -111,6 +144,12 @@ Before any production cutover:
 7. Switch the Cloudflare load balancer active pool from AWS to DO.
 8. Remove maintenance mode only after DO validation passes.
 
+To promote DO with the current Cloudflare global-key fallback:
+
+```bash
+deploy/cloudflare/scripts/switch-lb-primary.sh --target do --exclusive
+```
+
 ## 5. Rollback window
 
 - Keep AWS online but out of traffic for 72 hours.
@@ -119,7 +158,11 @@ Before any production cutover:
 - Any rollback after writes reopen requires:
   - a fresh maintenance window
   - a reverse sync plan from DO back to AWS
-  - a deliberate Cloudflare LB switch back to AWS
+  - a deliberate Cloudflare LB switch back to AWS:
+
+    ```bash
+    deploy/cloudflare/scripts/switch-lb-primary.sh --target aws
+    ```
 
 ## 6. Final decommission
 
