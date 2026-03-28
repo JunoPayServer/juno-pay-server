@@ -180,5 +180,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl --retry 20 --retry-delay 5 --fail --show-error -H "Host: ${VERIFY_HOST}" "http://${DO_HOST}/v1/health"
-          curl --retry 20 --retry-delay 5 --fail --show-error -H "Host: ${VERIFY_HOST}" "http://${DO_HOST}/v1/status"
+          curl --retry 20 --retry-delay 5 --retry-connrefused --fail --show-error \
+            --resolve "${VERIFY_HOST}:443:${DO_HOST}" \
+            "https://${VERIFY_HOST}/v1/health"
+          curl --retry 20 --retry-delay 5 --retry-connrefused --fail --show-error \
+            --resolve "${VERIFY_HOST}:443:${DO_HOST}" \
+            "https://${VERIFY_HOST}/v1/status"
