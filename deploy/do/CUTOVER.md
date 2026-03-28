@@ -3,12 +3,14 @@
 This runbook assumes:
 
 - AWS remains the live origin until the final maintenance window.
-- Cloudflare is already configured with DNS records for:
+- Cloudflare is already configured with proxied DNS records for:
   - `junopayserver.com`
   - `www.junopayserver.com`
   - `staging.junopayserver.com`
 - The DO foundation already exists in project `junopayserver`.
-- Cloudflare Access and Load Balancing remain blocked until the Cloudflare plugin is reconnected with the required Zero Trust and Load Balancing permissions.
+- Cloudflare Access is already live for staging and production admin paths.
+- Cloudflare zone SSL mode is already `strict`.
+- Cloudflare Load Balancing remains the only Cloudflare blocker for production cutover.
 
 ## 1. Pre-stage the DO host
 
@@ -57,26 +59,30 @@ This copies:
 - `/opt/juno-pay/data/juno-scan`
 - `/opt/juno-pay/data/juno-pay-server`
 
+Warm sync requires source-host shell access. If the AWS host blocks SSH, restore temporary operator access before attempting the sync. Do not proceed to production cutover without a verified source access path.
+
 Repeat the warm sync until the final maintenance window.
 
 ## 3. Validate staging
 
 Before any production cutover:
 
-1. Point `staging.junopayserver.com` at the DO reserved IP.
+1. Keep `staging.junopayserver.com` pointed at the DO reserved IP.
 2. Confirm the DO host answers:
    - `GET /v1/health`
    - `GET /v1/status`
    - `/admin/`
    - demo app root `/`
-3. Confirm invoice creation, public invoice fetch, and webhook/status updates behave correctly.
-4. Once Cloudflare Access permissions are fixed, protect the full staging hostname before broader validation.
+3. Confirm unauthenticated staging requests redirect to Access.
+4. Confirm the Access service token can reach staging.
+5. Confirm invoice creation, public invoice fetch, and webhook/status updates behave correctly.
 
 ## 4. Final maintenance window
 
-1. Enable maintenance mode at the edge.
-2. Stop the AWS stack cleanly.
-3. Run one final sync:
+1. Confirm the Cloudflare load balancer, monitor, and both pools are healthy with AWS active and DO standby.
+2. Enable maintenance mode at the edge.
+3. Stop the AWS stack cleanly.
+4. Run one final sync:
 
    ```bash
    deploy/do/scripts/sync-state-stream.sh \
@@ -86,23 +92,24 @@ Before any production cutover:
      --target-user root
    ```
 
-4. Start or restart the DO stack.
-5. Validate on DO:
+5. Start or restart the DO stack.
+6. Validate on DO:
    - `/v1/health`
    - `/v1/status`
    - admin login
    - synthetic invoice create/fetch/update flow
-6. Switch Cloudflare traffic from AWS to DO.
-7. Remove maintenance mode only after DO validation passes.
+7. Switch the Cloudflare load balancer active pool from AWS to DO.
+8. Remove maintenance mode only after DO validation passes.
 
 ## 5. Rollback window
 
 - Keep AWS online but out of traffic for 72 hours.
 - Treat DO as the source of truth after reopening writes.
+- Remove AWS from active failover after writes reopen. Do not leave AWS as an automatic fallback target once DO accepts production writes.
 - Any rollback after writes reopen requires:
   - a fresh maintenance window
   - a reverse sync plan from DO back to AWS
-  - a deliberate Cloudflare origin switch
+  - a deliberate Cloudflare LB switch back to AWS
 
 ## 6. Final decommission
 
