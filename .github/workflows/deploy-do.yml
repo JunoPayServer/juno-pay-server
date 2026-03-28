@@ -176,6 +176,8 @@ jobs:
             printf '%s\n' "JUNO_PAY_ADMIN_PASSWORD=${{ secrets.JUNO_PAY_ADMIN_PASSWORD }}"
             printf '%s\n' "JUNO_PAY_TOKEN_KEY_HEX=${{ secrets.JUNO_PAY_TOKEN_KEY_HEX }}"
             printf '%s\n' "JUNO_PAY_DEMO_MERCHANT_API_KEY=${DEMO_MERCHANT_API_KEY}"
+            printf '%s\n' "CADDY_ORIGIN_CERT_PEM_B64=${{ secrets.CADDY_ORIGIN_CERT_PEM_B64 }}"
+            printf '%s\n' "CADDY_ORIGIN_KEY_PEM_B64=${{ secrets.CADDY_ORIGIN_KEY_PEM_B64 }}"
           } >/tmp/juno-pay-do.env
 
           scp /tmp/juno-pay-do.env root@"${DO_HOST}":/tmp/juno-pay-deploy/deploy.env

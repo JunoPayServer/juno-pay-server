@@ -26,14 +26,29 @@ DATA_DIR="${DATA_DIR:-${ROOT}/data}"
 RUNTIME_ENV_PATH="${RUNTIME_ENV_PATH:-${ROOT}/runtime.env}"
 COMPOSE_PATH="${ROOT}/docker-compose.yml"
 CADDYFILE_PATH="${ROOT}/Caddyfile"
+CERTS_DIR="${ROOT}/certs"
 
 JUNO_CHAIN="${JUNO_CHAIN:-mainnet}"
 JUNO_SCAN_UA_HRP="${JUNO_SCAN_UA_HRP:-j}"
 JUNO_SCAN_CONFIRMATIONS="${JUNO_SCAN_CONFIRMATIONS:-100}"
 JUNO_PAY_DEMO_MERCHANT_API_KEY="${JUNO_PAY_DEMO_MERCHANT_API_KEY:-}"
 CADDY_SERVER_NAMES="${CADDY_SERVER_NAMES:-${DOMAIN_NAME}, ${WWW_DOMAIN}, ${STAGING_DOMAIN}}"
+CADDY_ORIGIN_CERT_PEM_B64="${CADDY_ORIGIN_CERT_PEM_B64:-}"
+CADDY_ORIGIN_KEY_PEM_B64="${CADDY_ORIGIN_KEY_PEM_B64:-}"
 
 mkdir -p "${ROOT}" "${DATA_DIR}"
+
+if [[ -n "${CADDY_ORIGIN_CERT_PEM_B64}" || -n "${CADDY_ORIGIN_KEY_PEM_B64}" ]]; then
+  if [[ -z "${CADDY_ORIGIN_CERT_PEM_B64}" || -z "${CADDY_ORIGIN_KEY_PEM_B64}" ]]; then
+    echo "CADDY_ORIGIN_CERT_PEM_B64 and CADDY_ORIGIN_KEY_PEM_B64 must both be set" >&2
+    exit 2
+  fi
+  mkdir -p "${CERTS_DIR}"
+  umask 077
+  printf '%s' "${CADDY_ORIGIN_CERT_PEM_B64}" | base64 --decode > "${CERTS_DIR}/origin.crt"
+  printf '%s' "${CADDY_ORIGIN_KEY_PEM_B64}" | base64 --decode > "${CERTS_DIR}/origin.key"
+  chmod 600 "${CERTS_DIR}/origin.crt" "${CERTS_DIR}/origin.key"
+fi
 
 if [[ -n "${GHCR_TOKEN:-}" ]]; then
   if [[ -z "${GHCR_USERNAME:-}" ]]; then
@@ -157,6 +172,29 @@ services:
       - /opt/juno-pay/data/caddy/config:/config
 EOF
 
+if [[ -n "${CADDY_ORIGIN_CERT_PEM_B64}" ]]; then
+  cat >> "${COMPOSE_PATH}" <<'EOF'
+      - /opt/juno-pay/certs:/etc/caddy/certs:ro
+EOF
+fi
+
+if [[ -n "${CADDY_ORIGIN_CERT_PEM_B64}" ]]; then
+  cat > "${CADDYFILE_PATH}" <<EOF
+${CADDY_SERVER_NAMES} {
+  tls /etc/caddy/certs/origin.crt /etc/caddy/certs/origin.key
+  encode zstd gzip
+
+  @backend path /admin* /v1/*
+  handle @backend {
+    reverse_proxy juno-pay-server:8080
+  }
+
+  handle {
+    reverse_proxy demo-app:3000
+  }
+}
+EOF
+else
 cat > "${CADDYFILE_PATH}" <<EOF
 ${CADDY_SERVER_NAMES} {
   encode zstd gzip
@@ -171,6 +209,7 @@ ${CADDY_SERVER_NAMES} {
   }
 }
 EOF
+fi
 
 docker compose --env-file "${RUNTIME_ENV_PATH}" -f "${COMPOSE_PATH}" config >/dev/null
 docker compose --env-file "${RUNTIME_ENV_PATH}" -f "${COMPOSE_PATH}" pull

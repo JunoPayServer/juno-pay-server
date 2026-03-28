@@ -94,6 +94,8 @@ Required environment variables for `deploy/do/scripts/deploy-stack.sh`:
 - `JUNO_PAY_ADMIN_PASSWORD`
 - `JUNO_PAY_TOKEN_KEY_HEX`
 - Optional: `JUNO_PAY_DEMO_MERCHANT_API_KEY`
+- Optional: `CADDY_ORIGIN_CERT_PEM_B64`
+- Optional: `CADDY_ORIGIN_KEY_PEM_B64`
 - Optional: `GHCR_USERNAME`, `GHCR_TOKEN`
 
 Manual example:
@@ -114,6 +116,8 @@ ssh root@<reserved-ip> '
   export JUNO_PAY_ADMIN_PASSWORD=<admin-password>
   export JUNO_PAY_TOKEN_KEY_HEX=<token-key-hex>
   export JUNO_PAY_DEMO_MERCHANT_API_KEY=<merchant-api-key>
+  export CADDY_ORIGIN_CERT_PEM_B64=<base64-pem-cert>
+  export CADDY_ORIGIN_KEY_PEM_B64=<base64-pem-key>
   export GHCR_USERNAME=<github-user>
   export GHCR_TOKEN=<ghcr-token>
   bash /tmp/juno-pay-deploy/scripts/deploy-stack.sh
@@ -139,6 +143,8 @@ Required repository secrets:
 - `JUNO_PAY_TOKEN_KEY_HEX`
 - Optional: `DEMO_MERCHANT_API_KEY`
 - Optional: `DEMO_MERCHANT_API_KEY_STAGING`
+- Optional: `CADDY_ORIGIN_CERT_PEM_B64`
+- Optional: `CADDY_ORIGIN_KEY_PEM_B64`
 
 The workflow:
 
@@ -147,5 +153,6 @@ The workflow:
 - bootstraps the host (optional per run)
 - deploys the stack over SSH
 - prefers `DEMO_MERCHANT_API_KEY_STAGING` when `verify_host` matches `staging_domain`
+- uses Cloudflare Origin CA certs for Caddy when `CADDY_ORIGIN_CERT_PEM_B64` and `CADDY_ORIGIN_KEY_PEM_B64` are present
 - defaults to staging-only certificate issuance with `caddy_server_names=staging.junopayserver.com`
 - checks `/v1/health` and `/v1/status` over HTTPS against the DO reserved IP using the configured `verify_host`
