@@ -5,7 +5,8 @@ AWS is now legacy-only in this repo.
 Use the AWS deployment material for:
 
 - source-host inspection during the DO migration
-- warm-sync access recovery
+- snapshot-based warm sync and final cutover sync
+- source-host access recovery fallback if snapshot migration becomes unusable
 - rollback reference until the DO cutover is complete
 - final decommission after the 72-hour hold
 
@@ -21,16 +22,57 @@ The current production origin still runs on AWS and remains the active Cloudflar
 - Security group: `sg-0595fddf6f6561904`
 - Data volume: `vol-0d5701021c67b3f7d`
 
-Observed source-access blockers as of `2026-03-28`:
+Current mutable-state migration defaults as of `2026-03-28`:
+
+- primary path: snapshot-derived helper sync from `vol-0d5701021c67b3f7d`
+- helper host: `i-06f8b5e5c0aa7dece` (`juno-prod-desktop-signer`)
+- final cutover path: cold snapshot after AWS stop
+- source-host SSH repair is fallback only
+
+Observed source-access blockers on the live source host:
 
 - `KeyName` is `null`
 - the host is not registered in SSM
 - EC2 Instance Connect push succeeded, but login still failed
 - the host only became reachable on `22/tcp` when a temporary operator CIDR rule was added
 
-## Access recovery workflow
+## Snapshot sync workflow
 
-Use the scripted access check first:
+Use the snapshot-sync entrypoint for warm syncs and the final cold-sync pass:
+
+```bash
+deploy/aws/scripts/sync-data-volume-snapshot.sh \
+  --do-ssh-key <path-to-existing-do-ssh-key> \
+  --region us-east-1 \
+  --readiness-service-token-file tmp/cloudflare-access-service-token.json
+```
+
+The script:
+
+- ensures the helper instance is running and SSM-online
+- creates a snapshot of `vol-0d5701021c67b3f7d`
+- creates and attaches a temporary volume from that snapshot in `us-east-1a`
+- mounts that temporary volume read-only on the helper
+- detects the helper egress IP and temporarily opens `22/tcp` on the DO firewall for that `/32`
+- copies the existing DO SSH private key to the helper for the sync only
+- streams `junocashd`, `juno-scan`, and `juno-pay-server` to the DO host
+- removes the temporary DO firewall rule, deletes the temporary sync volume, and optionally stops the helper
+
+Use `--snapshot-kind cold` during the final maintenance window after the AWS source instance is stopped.
+
+If a run is interrupted after the snapshot is already created, resume from that snapshot with:
+
+```bash
+deploy/aws/scripts/sync-data-volume-snapshot.sh \
+  --snapshot-id <existing-snapshot-id> \
+  --do-ssh-key <path-to-existing-do-ssh-key>
+```
+
+If a warm sync succeeds, keep its snapshot until the next successful warm sync. The script prints `snapshot_id=...` so the previous warm snapshot can be deleted on the next successful run with `--delete-snapshot-id`.
+
+## Source-access fallback workflow
+
+If the snapshot path becomes unusable, fall back to the source-access check:
 
 ```bash
 deploy/aws/scripts/check-source-access.sh \
@@ -42,15 +84,7 @@ deploy/aws/scripts/check-source-access.sh \
   --use-ec2-instance-connect
 ```
 
-The script:
-
-- checks whether SSM is online and can execute a shell command
-- temporarily opens `22/tcp` only to the operator CIDR when SSH testing is requested
-- optionally publishes a one-time EC2 Instance Connect key for `ec2-user`
-- verifies shell access by checking `/opt/juno-pay/data`
-- removes the temporary `22/tcp` rule automatically unless `--leave-ssh-open` is used
-
-If the script cannot verify either SSM or SSH access, stop retrying ad hoc keys and switch to the rescue workflow.
+If the script cannot verify either SSM or SSH access, stop retrying ad hoc keys and switch to the rescue workflow below.
 
 ## Rescue-window workflow
 

@@ -32,7 +32,7 @@ deploy/do/scripts/describe-live-resources.sh
 
 Cutover and data-migration steps live in `deploy/do/CUTOVER.md`.
 
-AWS source-access recovery and legacy reference material live in `deploy/aws/README.md`.
+AWS snapshot migration, source-access fallback, and legacy reference material live in `deploy/aws/README.md`.
 
 ## Account constraint observed
 
@@ -126,7 +126,23 @@ ssh root@<reserved-ip> '
 '
 ```
 
-To stream the mutable data directories from the current AWS host to the DO host through your workstation:
+Primary mutable-state sync path:
+
+```bash
+deploy/aws/scripts/sync-data-volume-snapshot.sh \
+  --do-ssh-key <path-to-existing-do-ssh-key> \
+  --readiness-service-token-file tmp/cloudflare-access-service-token.json
+```
+
+This uses the AWS helper instance to mount a snapshot-derived copy of the AWS data volume read-only and stream:
+
+- `junocashd`
+- `juno-scan`
+- `juno-pay-server`
+
+to the DO host over SSH.
+
+Legacy fallback path if snapshot migration becomes unusable:
 
 ```bash
 deploy/do/scripts/sync-state-stream.sh \

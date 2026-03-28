@@ -11,11 +11,12 @@ This runbook assumes:
 - Cloudflare Access is already live for staging and production admin paths.
 - Cloudflare zone SSL mode is already `strict`.
 - Cloudflare Load Balancing is already live with AWS active and DO as healthy standby.
-- The remaining blocker before cutover is verified shell access to the AWS source host for the warm sync.
+- Warm syncs and the final cutover sync use snapshot-derived helper transfers from the AWS data volume.
 
 Supporting operator tools:
 
-- source-host access verification: `deploy/aws/scripts/check-source-access.sh`
+- snapshot sync orchestration: `deploy/aws/scripts/sync-data-volume-snapshot.sh`
+- source-host access verification fallback: `deploy/aws/scripts/check-source-access.sh`
 - post-sync readiness comparison: `deploy/do/scripts/check-cutover-readiness.sh`
 - Cloudflare LB primary switch: `deploy/cloudflare/scripts/switch-lb-primary.sh`
 
@@ -48,27 +49,40 @@ Supporting operator tools:
 
    Expand `CADDY_SERVER_NAMES` to `junopayserver.com, www.junopayserver.com, staging.junopayserver.com` only when production traffic is ready to move.
 
-## 2. Warm-sync mutable state from AWS
+## 2. Warm-sync mutable state from AWS snapshots
 
-Run the streaming sync from an operator workstation that can SSH to both hosts:
+Run the snapshot-derived sync from an operator workstation that has:
+
+- AWS CLI access
+- `doctl --context juno`
+- the existing DO SSH private key for `root@159.203.150.96`
+
+Warm sync command:
 
 ```bash
-deploy/do/scripts/sync-state-stream.sh \
-  --source-host 18.206.49.27 \
-  --source-user ec2-user \
-  --target-host 159.203.150.96 \
-  --target-user root
+deploy/aws/scripts/sync-data-volume-snapshot.sh \
+  --do-ssh-key <path-to-existing-do-ssh-key> \
+  --readiness-service-token-file tmp/cloudflare-access-service-token.json
 ```
 
-This copies:
+This flow:
 
-- `/opt/juno-pay/data/junocashd`
-- `/opt/juno-pay/data/juno-scan`
-- `/opt/juno-pay/data/juno-pay-server`
+- starts helper `i-06f8b5e5c0aa7dece` if needed
+- snapshots `vol-0d5701021c67b3f7d`
+- creates and attaches a temporary sync volume in `us-east-1a`
+- mounts the snapshot volume read-only on the helper
+- temporarily allows the helper egress `/32` to reach DO SSH
+- copies:
+  - `junocashd`
+  - `juno-scan`
+  - `juno-pay-server`
+- removes the temporary DO firewall rule and deletes the temporary sync volume
 
-Warm sync requires source-host shell access. If the AWS host blocks SSH, restore temporary operator access before attempting the sync. Do not proceed to production cutover without a verified source access path.
+If a sync is interrupted after the snapshot is already created, resume from it with `--snapshot-id <existing-snapshot-id>` instead of starting over.
 
-Use the scripted source access check instead of ad hoc SSH retries:
+Warm sync no longer depends on shell access to the live AWS source host.
+
+Source-host SSH recovery is fallback only. Use it only if the snapshot path becomes unusable:
 
 ```bash
 deploy/aws/scripts/check-source-access.sh \
@@ -80,22 +94,18 @@ deploy/aws/scripts/check-source-access.sh \
   --use-ec2-instance-connect
 ```
 
-Current source-host blocker observed during implementation:
-
-- port `22/tcp` was not open by default
-- temporary source-side SSH access from the operator workstation reached the host, but none of the available private keys authenticated successfully
-- `ec2-user`, `ubuntu`, `admin`, and `root` were all rejected
-- EC2 Instance Connect accepted the public key push for `ec2-user`, but the host still rejected the login
-
-Resolve the source-host access path before scheduling the cutover window.
-
 Repeat the warm sync until the final maintenance window.
 
 Recommended cadence:
 
-- run the first warm sync immediately after source access is restored
+- run the first warm sync immediately
 - repeat every 24 hours until cutover
 - run an extra warm sync after any production-side change that affects mutable state
+
+Snapshot retention:
+
+- keep the latest successful warm snapshot until the next warm sync succeeds
+- delete the previous warm snapshot on the next successful run with `--delete-snapshot-id <old-snapshot-id>`
 
 ## 3. Validate staging
 
@@ -124,15 +134,14 @@ Add `--merchant-api-key <merchant-api-key>` when you want the scripted synthetic
 
 1. Confirm the Cloudflare load balancer, monitor, and both pools are still healthy with AWS active and DO standby.
 2. Enable maintenance mode at the edge.
-3. Stop the AWS stack cleanly.
-4. Run one final sync:
+3. Stop the AWS source instance `i-0fe82490b2e05db4e`.
+4. Run one final cold snapshot sync:
 
    ```bash
-   deploy/do/scripts/sync-state-stream.sh \
-     --source-host 18.206.49.27 \
-     --source-user ec2-user \
-     --target-host 159.203.150.96 \
-     --target-user root
+   deploy/aws/scripts/sync-data-volume-snapshot.sh \
+     --snapshot-kind cold \
+     --do-ssh-key <path-to-existing-do-ssh-key> \
+     --readiness-service-token-file tmp/cloudflare-access-service-token.json
    ```
 
 5. Start or restart the DO stack.
@@ -152,7 +161,7 @@ deploy/cloudflare/scripts/switch-lb-primary.sh --target do --exclusive
 
 ## 5. Rollback window
 
-- Keep AWS online but out of traffic for 72 hours.
+- Keep AWS stopped and out of traffic for 72 hours.
 - Treat DO as the source of truth after reopening writes.
 - Remove AWS from active failover after writes reopen. Do not leave AWS as an automatic fallback target once DO accepts production writes.
 - Any rollback after writes reopen requires:
