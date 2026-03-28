@@ -6,15 +6,31 @@ set -euo pipefail
 : "${TARGET_USER:?TARGET_USER is required}"
 : "${TARGET_ROOT:?TARGET_ROOT is required}"
 : "${DO_SSH_KEY_B64:?DO_SSH_KEY_B64 is required}"
+: "${SNAPSHOT_KIND:?SNAPSHOT_KIND is required}"
 
 HELPER_MOUNT_POINT="${HELPER_MOUNT_POINT:-/mnt/juno-pay-source}"
 DO_SSH_KEY_PATH="${DO_SSH_KEY_PATH:-/root/.ssh/junopayserver-snapshot-sync}"
+SOURCE_DIRS=()
 
-SOURCE_DIRS=(
-  junocashd
-  juno-scan
-  juno-pay-server
-)
+case "$SNAPSHOT_KIND" in
+  warm)
+    SOURCE_DIRS=(
+      junocashd
+      juno-pay-server
+    )
+    ;;
+  cold)
+    SOURCE_DIRS=(
+      junocashd
+      juno-scan
+      juno-pay-server
+    )
+    ;;
+  *)
+    echo "unsupported snapshot kind: $SNAPSHOT_KIND" >&2
+    exit 2
+    ;;
+esac
 
 MOUNTED=0
 

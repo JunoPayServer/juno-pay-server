@@ -55,7 +55,10 @@ The script:
 - mounts that temporary volume read-only on the helper
 - detects the helper egress IP and temporarily opens `22/tcp` on the DO firewall for that `/32`
 - copies the existing DO SSH private key to the helper for the sync only
-- streams `junocashd`, `juno-scan`, and `juno-pay-server` to the DO host
+- stops the DO core services before applying synced state
+- streams `junocashd` and `juno-pay-server` during `warm` syncs
+- streams `junocashd`, `juno-scan`, and `juno-pay-server` during `cold` syncs
+- rebuilds `juno-scan` on staging after every warm sync by wiping `/opt/juno-pay/data/juno-scan/db`, resetting `scan_cursors` in `/opt/juno-pay/data/juno-pay-server/state.sqlite`, re-registering merchant wallets, and backfilling each wallet history through the warmed chain tip
 - removes the temporary DO firewall rule, deletes the temporary sync volume, and optionally stops the helper
 
 Use `--snapshot-kind cold` during the final maintenance window after the AWS source instance is stopped.
@@ -69,6 +72,8 @@ deploy/aws/scripts/sync-data-volume-snapshot.sh \
 ```
 
 If a warm sync succeeds, keep its snapshot until the next successful warm sync. The script prints `snapshot_id=...` so the previous warm snapshot can be deleted on the next successful run with `--delete-snapshot-id`.
+
+Live warm snapshots of `juno-scan` are no longer considered safe. Treat `juno-scan` as rebuildable cache during warm-up and authoritative state only during the final cold cutover sync.
 
 ## Source-access fallback workflow
 

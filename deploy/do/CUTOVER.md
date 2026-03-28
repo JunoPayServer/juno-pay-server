@@ -18,6 +18,7 @@ Supporting operator tools:
 - snapshot sync orchestration: `deploy/aws/scripts/sync-data-volume-snapshot.sh`
 - source-host access verification fallback: `deploy/aws/scripts/check-source-access.sh`
 - post-sync readiness comparison: `deploy/do/scripts/check-cutover-readiness.sh`
+- warm replay/reset on DO staging: `deploy/do/scripts/rebuild-staging-scan-state.sh`
 - Cloudflare LB primary switch: `deploy/cloudflare/scripts/switch-lb-primary.sh`
 
 ## 1. Pre-stage the DO host
@@ -72,10 +73,10 @@ This flow:
 - creates and attaches a temporary sync volume in `us-east-1a`
 - mounts the snapshot volume read-only on the helper
 - temporarily allows the helper egress `/32` to reach DO SSH
-- copies:
-  - `junocashd`
-  - `juno-scan`
-  - `juno-pay-server`
+- stops the DO core services before synced state is applied
+- copies `junocashd` and `juno-pay-server` during warm syncs
+- rebuilds `juno-scan` on staging after warm syncs by wiping the scanner DB, deleting all `scan_cursors`, re-registering wallets, and backfilling wallet history through the warmed chain tip
+- copies `junocashd`, `juno-scan`, and `juno-pay-server` during the final cold sync
 - removes the temporary DO firewall rule and deletes the temporary sync volume
 
 If a sync is interrupted after the snapshot is already created, resume from it with `--snapshot-id <existing-snapshot-id>` instead of starting over.
@@ -125,10 +126,13 @@ After each warm sync, run:
 
 ```bash
 deploy/do/scripts/check-cutover-readiness.sh \
+  --mode warm \
   --service-token-file tmp/cloudflare-access-service-token.json
 ```
 
 Add `--merchant-api-key <merchant-api-key>` when you want the scripted synthetic invoice create/public fetch check in the same run.
+
+Do not treat container health alone as sufficient after a warm rebuild. Warm staging is only usable when the warm-mode readiness check passes.
 
 ## 4. Final maintenance window
 
@@ -144,12 +148,20 @@ Add `--merchant-api-key <merchant-api-key>` when you want the scripted synthetic
      --readiness-service-token-file tmp/cloudflare-access-service-token.json
    ```
 
-5. Start or restart the DO stack.
+5. Start or restart the DO stack if needed.
 6. Validate on DO:
    - `/v1/health`
    - `/v1/status`
    - admin login
    - synthetic invoice create/fetch/update flow
+   - final readiness parity:
+
+     ```bash
+     deploy/do/scripts/check-cutover-readiness.sh \
+       --mode final \
+       --service-token-file tmp/cloudflare-access-service-token.json
+     ```
+
 7. Switch the Cloudflare load balancer active pool from AWS to DO.
 8. Remove maintenance mode only after DO validation passes.
 

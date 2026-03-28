@@ -134,13 +134,34 @@ deploy/aws/scripts/sync-data-volume-snapshot.sh \
   --readiness-service-token-file tmp/cloudflare-access-service-token.json
 ```
 
-This uses the AWS helper instance to mount a snapshot-derived copy of the AWS data volume read-only and stream:
+This uses the AWS helper instance to mount a snapshot-derived copy of the AWS data volume read-only.
+
+Warm syncs stream only:
+
+- `junocashd`
+- `juno-pay-server`
+
+Cold syncs stream:
 
 - `junocashd`
 - `juno-scan`
 - `juno-pay-server`
 
-to the DO host over SSH.
+Warm syncs stop the DO core services before applying state, then rebuild `juno-scan` on staging from the warmed chain data by:
+
+- deleting `/opt/juno-pay/data/juno-scan/db`
+- backing up `/opt/juno-pay/data/juno-pay-server/state.sqlite`
+- deleting all rows from `scan_cursors`
+- re-registering merchant wallets in `juno-scan`
+- calling `POST /v1/wallets/{wallet_id}/backfill` until the scanner has walked the warmed chain history
+- restarting `junocashd`, `juno-scan`, and `juno-pay-server`
+
+Standalone replay/reset entrypoint:
+
+```bash
+ssh root@159.203.150.96 'bash -se -- --root /opt/juno-pay' \
+  < deploy/do/scripts/rebuild-staging-scan-state.sh
+```
 
 Legacy fallback path if snapshot migration becomes unusable:
 
@@ -154,6 +175,7 @@ To compare the current AWS production state against the DO staging state after e
 
 ```bash
 deploy/do/scripts/check-cutover-readiness.sh \
+  --mode warm \
   --service-token-file tmp/cloudflare-access-service-token.json
 ```
 
@@ -161,8 +183,17 @@ If you also want the synthetic invoice create/public fetch check in the same run
 
 ```bash
 deploy/do/scripts/check-cutover-readiness.sh \
+  --mode warm \
   --service-token-file tmp/cloudflare-access-service-token.json \
   --merchant-api-key <merchant-api-key>
+```
+
+For the final cold-sync validation, switch to:
+
+```bash
+deploy/do/scripts/check-cutover-readiness.sh \
+  --mode final \
+  --service-token-file tmp/cloudflare-access-service-token.json
 ```
 
 ## GitHub Actions deployment
