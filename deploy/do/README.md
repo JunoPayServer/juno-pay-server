@@ -86,6 +86,7 @@ Required environment variables for `deploy/do/scripts/deploy-stack.sh`:
 - `DOMAIN_NAME`
 - `WWW_DOMAIN`
 - `STAGING_DOMAIN`
+- Optional: `CADDY_SERVER_NAMES` (defaults to `DOMAIN_NAME, WWW_DOMAIN, STAGING_DOMAIN`)
 - `IMAGE_JUNO_PAY_SERVER`
 - `IMAGE_JUNOCASHD`
 - `IMAGE_JUNO_SCAN`
@@ -105,6 +106,7 @@ ssh root@<reserved-ip> '
   export DOMAIN_NAME=junopayserver.com
   export WWW_DOMAIN=www.junopayserver.com
   export STAGING_DOMAIN=staging.junopayserver.com
+  export CADDY_SERVER_NAMES=staging.junopayserver.com
   export IMAGE_JUNO_PAY_SERVER=ghcr.io/<owner>/juno-pay-juno-pay-server:prod
   export IMAGE_JUNOCASHD=ghcr.io/<owner>/juno-pay-junocashd:prod
   export IMAGE_JUNO_SCAN=ghcr.io/<owner>/juno-pay-juno-scan:prod
@@ -143,4 +145,5 @@ The workflow:
 - copies the DO deploy scripts to the host
 - bootstraps the host (optional per run)
 - deploys the stack over SSH
-- checks `/v1/health` and `/v1/status` over HTTP against the DO reserved IP using the production host header
+- defaults to staging-only certificate issuance with `caddy_server_names=staging.junopayserver.com`
+- checks `/v1/health` and `/v1/status` over HTTP against the DO reserved IP using the configured `verify_host`

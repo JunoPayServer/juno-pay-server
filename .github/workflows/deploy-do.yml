@@ -19,6 +19,14 @@ on:
         description: Staging hostname served by Caddy
         required: true
         default: staging.junopayserver.com
+      caddy_server_names:
+        description: Comma-separated Caddy server names for certificate issuance
+        required: true
+        default: staging.junopayserver.com
+      verify_host:
+        description: Host header used for post-deploy health checks
+        required: true
+        default: staging.junopayserver.com
       image_prefix:
         description: GHCR image prefix
         required: true
@@ -64,6 +72,8 @@ jobs:
       DOMAIN_NAME: ${{ inputs.domain_name }}
       WWW_DOMAIN: ${{ inputs.www_domain }}
       STAGING_DOMAIN: ${{ inputs.staging_domain }}
+      CADDY_SERVER_NAMES: ${{ inputs.caddy_server_names }}
+      VERIFY_HOST: ${{ inputs.verify_host }}
       IMAGE_PREFIX: ${{ inputs.image_prefix }}
       JUNO_CHAIN: ${{ inputs.juno_chain }}
       JUNO_SCAN_UA_HRP: ${{ inputs.juno_scan_ua_hrp }}
@@ -148,6 +158,7 @@ jobs:
             printf '%s\n' "DOMAIN_NAME=${DOMAIN_NAME}"
             printf '%s\n' "WWW_DOMAIN=${WWW_DOMAIN}"
             printf '%s\n' "STAGING_DOMAIN=${STAGING_DOMAIN}"
+            printf '%s\n' "CADDY_SERVER_NAMES=${CADDY_SERVER_NAMES}"
             printf '%s\n' "GHCR_USERNAME=${GITHUB_ACTOR}"
             printf '%s\n' "GHCR_TOKEN=${{ secrets.GITHUB_TOKEN }}"
             printf '%s\n' "IMAGE_JUNO_PAY_SERVER=${IMAGE_JUNO_PAY_SERVER}"
@@ -169,5 +180,5 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl --retry 20 --retry-delay 5 --fail --show-error -H "Host: ${DOMAIN_NAME}" "http://${DO_HOST}/v1/health"
-          curl --retry 20 --retry-delay 5 --fail --show-error -H "Host: ${DOMAIN_NAME}" "http://${DO_HOST}/v1/status"
+          curl --retry 20 --retry-delay 5 --fail --show-error -H "Host: ${VERIFY_HOST}" "http://${DO_HOST}/v1/health"
+          curl --retry 20 --retry-delay 5 --fail --show-error -H "Host: ${VERIFY_HOST}" "http://${DO_HOST}/v1/status"

@@ -33,6 +33,11 @@ This runbook assumes:
 3. Deploy the stack to the DO host with staging enabled.
 
    Use `.github/workflows/deploy-do.yml` or run `deploy/do/scripts/deploy-stack.sh` manually over SSH.
+   For the initial staging deploy, set:
+
+   - `CADDY_SERVER_NAMES=staging.junopayserver.com`
+
+   Expand `CADDY_SERVER_NAMES` to `junopayserver.com, www.junopayserver.com, staging.junopayserver.com` only when production traffic is ready to move.
 
 ## 2. Warm-sync mutable state from AWS
 
