@@ -7,18 +7,18 @@ Usage:
   check-cutover-readiness.sh [options]
 
 Options:
-  --mode <warm|final>         Validation mode. Default: final
-  --production-url <url>      Default: https://junopayserver.com
-  --staging-url <url>         Default: https://staging.junopayserver.com
-  --service-token-file <path> JSON file with client_id/client_secret
-  --access-client-id <id>     Cloudflare Access service token client id
-  --access-client-secret <s>  Cloudflare Access service token client secret
-  --merchant-api-key <key>    Optional merchant API key for synthetic invoice create/fetch
-  --progress-seconds <sec>    Warm-mode cursor progress window. Default: 60
-  --target-host <host>        DO target host for juno-scan log checks. Default: 159.203.150.96
-  --target-user <user>        DO target user. Default: root
-  --target-ssh-key <path>     SSH key for DO target scanner checks
-  --target-deploy-root <path> DO deploy root. Default: /opt/juno-pay
+  --mode <bootstrap|warm|final>  Validation mode. Default: final
+  --production-url <url>         Default: https://junopayserver.com
+  --staging-url <url>            Default: https://staging.junopayserver.com
+  --service-token-file <path>    JSON file with client_id/client_secret
+  --access-client-id <id>        Cloudflare Access service token client id
+  --access-client-secret <sec>   Cloudflare Access service token client secret
+  --merchant-api-key <key>       Optional merchant API key for synthetic invoice create/fetch
+  --progress-seconds <sec>       Progress window for bootstrap/warm. Default: 60
+  --target-host <host>           DO target host. Default: 159.203.150.96
+  --target-user <user>           DO target user. Default: root
+  --target-ssh-key <path>        SSH key for DO target checks
+  --target-deploy-root <path>    DO deploy root. Default: /opt/juno-pay
 EOF
 }
 
@@ -97,8 +97,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "$MODE" != "warm" && "$MODE" != "final" ]]; then
-  echo "--mode must be warm or final" >&2
+if [[ "$MODE" != "bootstrap" && "$MODE" != "warm" && "$MODE" != "final" ]]; then
+  echo "--mode must be bootstrap, warm, or final" >&2
   exit 2
 fi
 
@@ -126,7 +126,7 @@ if [[ -z "$ACCESS_CLIENT_ID" || -z "$ACCESS_CLIENT_SECRET" ]]; then
 fi
 
 if [[ -z "$TARGET_SSH_KEY" ]]; then
-  echo "target ssh key is required for juno-scan readiness checks" >&2
+  echo "target ssh key is required for DO readiness checks" >&2
   exit 2
 fi
 
@@ -145,72 +145,6 @@ CURL_OPTS=(
   --max-time 30
 )
 
-fetch_status() {
-  local url output headers=()
-  url="$1"
-  output="$2"
-  shift 2
-  headers=("$@")
-  curl "${CURL_OPTS[@]}" "${headers[@]}" "$url/v1/status" >"$output"
-}
-
-fetch_scanner_sample() {
-  local health_out meta_out log_out raw_out
-  health_out="$1"
-  meta_out="$2"
-  log_out="$3"
-  raw_out="$tmpdir/$(basename "$health_out" .json).raw"
-
-  target_ssh bash -se -- "$TARGET_DEPLOY_ROOT" >"$raw_out" <<'EOF'
-set -euo pipefail
-
-ROOT="$1"
-COMPOSE_PATH="${ROOT}/docker-compose.yml"
-RUNTIME_ENV_PATH="${ROOT}/runtime.env"
-
-cid="$(docker compose --env-file "$RUNTIME_ENV_PATH" -f "$COMPOSE_PATH" ps -q juno-scan)"
-if [[ -z "$cid" ]]; then
-  echo "juno-scan container is not running" >&2
-  exit 1
-fi
-
-started_at="$(docker inspect -f '{{.State.StartedAt}}' "$cid")"
-health="$(docker exec "$cid" curl -fsS http://127.0.0.1:8080/v1/health)"
-
-printf '__META__\n'
-printf 'container_id=%s\nstarted_at=%s\n' "$cid" "$started_at"
-printf '__HEALTH__\n'
-printf '%s\n' "$health"
-printf '__LOG__\n'
-docker logs --since "$started_at" "$cid" 2>&1 || true
-EOF
-
-python3 - <<'PY' "$raw_out" "$health_out" "$meta_out" "$log_out"
-import sys
-
-raw_path, health_path, meta_path, log_path = sys.argv[1:5]
-with open(raw_path, "r", encoding="utf-8") as f:
-    raw = f.read()
-
-meta_marker = "__META__\n"
-health_marker = "__HEALTH__\n"
-log_marker = "__LOG__\n"
-if not raw.startswith(meta_marker) or health_marker not in raw or log_marker not in raw:
-    raise SystemExit("unexpected scanner sample output")
-
-meta_body = raw[len(meta_marker):]
-meta_text, rest = meta_body.split(health_marker, 1)
-health_text, log_text = rest.split(log_marker, 1)
-
-with open(meta_path, "w", encoding="utf-8") as f:
-    f.write(meta_text)
-with open(health_path, "w", encoding="utf-8") as f:
-    f.write(health_text)
-with open(log_path, "w", encoding="utf-8") as f:
-    f.write(log_text)
-PY
-}
-
 target_ssh() {
   ssh \
     -i "$TARGET_SSH_KEY" \
@@ -219,6 +153,140 @@ target_ssh() {
     -o ConnectTimeout=10 \
     "${TARGET_USER}@${TARGET_HOST}" \
     "$@"
+}
+
+fetch_status() {
+  local url output headers=()
+  url="$1"
+  output="$2"
+  shift 2
+  headers=("$@")
+  curl "${CURL_OPTS[@]}" "${headers[@]}" "$url/v1/status" >"$output" || true
+}
+
+fetch_target_sample() {
+  local meta_out node_out scanner_out payserver_out log_out raw_out
+  meta_out="$1"
+  node_out="$2"
+  scanner_out="$3"
+  payserver_out="$4"
+  log_out="$5"
+  raw_out="$tmpdir/$(basename "$meta_out" .txt).raw"
+
+  target_ssh bash -se -- "$TARGET_DEPLOY_ROOT" >"$raw_out" <<'EOF'
+set -euo pipefail
+
+ROOT="$1"
+COMPOSE_PATH="${ROOT}/docker-compose.yml"
+RUNTIME_ENV_PATH="${ROOT}/runtime.env"
+
+service_id() {
+  docker compose --env-file "$RUNTIME_ENV_PATH" -f "$COMPOSE_PATH" ps -q "$1"
+}
+
+service_field() {
+  local cid field
+  cid="$1"
+  field="$2"
+  if [[ -z "$cid" ]]; then
+    return
+  fi
+  docker inspect -f "$field" "$cid" 2>/dev/null || true
+}
+
+JCD_CID="$(service_id junocashd)"
+SCAN_CID="$(service_id juno-scan)"
+PAY_CID="$(service_id juno-pay-server)"
+
+JCD_STARTED_AT="$(service_field "$JCD_CID" '{{.State.StartedAt}}')"
+SCAN_STARTED_AT="$(service_field "$SCAN_CID" '{{.State.StartedAt}}')"
+PAY_STARTED_AT="$(service_field "$PAY_CID" '{{.State.StartedAt}}')"
+
+JCD_STATE="$(service_field "$JCD_CID" '{{.State.Status}}')"
+SCAN_STATE="$(service_field "$SCAN_CID" '{{.State.Status}}')"
+PAY_STATE="$(service_field "$PAY_CID" '{{.State.Status}}')"
+
+JCD_HEALTH="$(service_field "$JCD_CID" '{{if .State.Health}}{{.State.Health.Status}}{{end}}')"
+SCAN_HEALTH="$(service_field "$SCAN_CID" '{{if .State.Health}}{{.State.Health.Status}}{{end}}')"
+PAY_HEALTH="$(service_field "$PAY_CID" '{{if .State.Health}}{{.State.Health.Status}}{{end}}')"
+
+JCD_HEIGHT=""
+if [[ -n "$JCD_CID" && "$JCD_STATE" == "running" ]]; then
+  JCD_HEIGHT="$(docker exec "$JCD_CID" juno-cli getblockcount 2>/dev/null || true)"
+fi
+
+SCAN_HEALTH_JSON="{}"
+if [[ -n "$SCAN_CID" && "$SCAN_STATE" == "running" ]]; then
+  SCAN_HEALTH_JSON="$(docker exec "$SCAN_CID" curl -fsS http://127.0.0.1:8080/v1/health 2>/dev/null || printf '{}')"
+fi
+
+PAY_STATUS_JSON="{}"
+if [[ -n "$PAY_CID" && "$PAY_STATE" == "running" ]]; then
+  PAY_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$PAY_CID" 2>/dev/null || true)"
+  if [[ -n "$PAY_IP" ]]; then
+    PAY_STATUS_JSON="$(curl -fsS "http://${PAY_IP}:8080/v1/status" 2>/dev/null || printf '{}')"
+  fi
+fi
+
+printf '__META__\n'
+printf 'junocashd_container_id=%s\n' "$JCD_CID"
+printf 'junocashd_started_at=%s\n' "$JCD_STARTED_AT"
+printf 'junocashd_state_status=%s\n' "$JCD_STATE"
+printf 'junocashd_health_status=%s\n' "$JCD_HEALTH"
+printf 'juno_scan_container_id=%s\n' "$SCAN_CID"
+printf 'juno_scan_started_at=%s\n' "$SCAN_STARTED_AT"
+printf 'juno_scan_state_status=%s\n' "$SCAN_STATE"
+printf 'juno_scan_health_status=%s\n' "$SCAN_HEALTH"
+printf 'juno_pay_server_container_id=%s\n' "$PAY_CID"
+printf 'juno_pay_server_started_at=%s\n' "$PAY_STARTED_AT"
+printf 'juno_pay_server_state_status=%s\n' "$PAY_STATE"
+printf 'juno_pay_server_health_status=%s\n' "$PAY_HEALTH"
+printf '__NODE_HEIGHT__\n'
+printf '%s\n' "$JCD_HEIGHT"
+printf '__SCANNER_HEALTH__\n'
+printf '%s\n' "$SCAN_HEALTH_JSON"
+printf '__PAYSERVER_STATUS__\n'
+printf '%s\n' "$PAY_STATUS_JSON"
+printf '__SCAN_LOG__\n'
+if [[ -n "$SCAN_CID" && -n "$SCAN_STARTED_AT" ]]; then
+  docker logs --since "$SCAN_STARTED_AT" "$SCAN_CID" 2>&1 || true
+fi
+EOF
+
+  python3 - <<'PY' "$raw_out" "$meta_out" "$node_out" "$scanner_out" "$payserver_out" "$log_out"
+import sys
+
+raw_path, meta_path, node_path, scanner_path, payserver_path, log_path = sys.argv[1:7]
+with open(raw_path, "r", encoding="utf-8") as f:
+    raw = f.read()
+
+markers = [
+    "__META__\n",
+    "__NODE_HEIGHT__\n",
+    "__SCANNER_HEALTH__\n",
+    "__PAYSERVER_STATUS__\n",
+    "__SCAN_LOG__\n",
+]
+if not raw.startswith(markers[0]):
+    raise SystemExit("unexpected target sample output")
+
+body = raw[len(markers[0]):]
+meta_text, rest = body.split(markers[1], 1)
+node_text, rest = rest.split(markers[2], 1)
+scanner_text, rest = rest.split(markers[3], 1)
+payserver_text, log_text = rest.split(markers[4], 1)
+
+with open(meta_path, "w", encoding="utf-8") as f:
+    f.write(meta_text)
+with open(node_path, "w", encoding="utf-8") as f:
+    f.write(node_text)
+with open(scanner_path, "w", encoding="utf-8") as f:
+    f.write(scanner_text)
+with open(payserver_path, "w", encoding="utf-8") as f:
+    f.write(payserver_text)
+with open(log_path, "w", encoding="utf-8") as f:
+    f.write(log_text)
+PY
 }
 
 prod_health_code="$(
@@ -299,18 +367,22 @@ PY
   fi
 fi
 
+target_meta_1="$tmpdir/target-meta-1.txt"
+target_node_1="$tmpdir/target-node-1.txt"
+target_scanner_1="$tmpdir/target-scanner-1.json"
+target_payserver_1="$tmpdir/target-payserver-1.json"
+target_scan_log_1="$tmpdir/target-scan-log-1.txt"
+fetch_target_sample "$target_meta_1" "$target_node_1" "$target_scanner_1" "$target_payserver_1" "$target_scan_log_1"
+
 prod_status_2="$prod_status_1"
 staging_status_2="$staging_status_1"
-scanner_health_1="$tmpdir/scanner-health-1.json"
-scanner_meta_1="$tmpdir/scanner-meta-1.txt"
-scanner_log_1="$tmpdir/scanner-log-1.txt"
-scanner_health_2="$scanner_health_1"
-scanner_meta_2="$scanner_meta_1"
-scanner_log_2="$scanner_log_1"
+target_meta_2="$target_meta_1"
+target_node_2="$target_node_1"
+target_scanner_2="$target_scanner_1"
+target_payserver_2="$target_payserver_1"
+target_scan_log_2="$target_scan_log_1"
 
-fetch_scanner_sample "$scanner_health_1" "$scanner_meta_1" "$scanner_log_1"
-
-if [[ "$MODE" == "warm" && "$PROGRESS_SECONDS" -gt 0 ]]; then
+if [[ "$MODE" != "final" && "$PROGRESS_SECONDS" -gt 0 ]]; then
   sleep "$PROGRESS_SECONDS"
   prod_status_2="$tmpdir/prod-status-2.json"
   staging_status_2="$tmpdir/staging-status-2.json"
@@ -318,21 +390,24 @@ if [[ "$MODE" == "warm" && "$PROGRESS_SECONDS" -gt 0 ]]; then
   fetch_status "$STAGING_URL" "$staging_status_2" \
     -H "CF-Access-Client-Id: $ACCESS_CLIENT_ID" \
     -H "CF-Access-Client-Secret: $ACCESS_CLIENT_SECRET"
-  scanner_health_2="$tmpdir/scanner-health-2.json"
-  scanner_meta_2="$tmpdir/scanner-meta-2.txt"
-  scanner_log_2="$tmpdir/scanner-log-2.txt"
-  fetch_scanner_sample "$scanner_health_2" "$scanner_meta_2" "$scanner_log_2"
+  target_meta_2="$tmpdir/target-meta-2.txt"
+  target_node_2="$tmpdir/target-node-2.txt"
+  target_scanner_2="$tmpdir/target-scanner-2.json"
+  target_payserver_2="$tmpdir/target-payserver-2.json"
+  target_scan_log_2="$tmpdir/target-scan-log-2.txt"
+  fetch_target_sample "$target_meta_2" "$target_node_2" "$target_scanner_2" "$target_payserver_2" "$target_scan_log_2"
 fi
 
 scan_log_status="clean"
-if grep -Eq "unknown to the objstorage provider|object size mismatch|Can't read block from disk|db connect: rocksdb: open:|panic: pebble: closed" "$scanner_log_2"; then
+if grep -Eq "unknown to the objstorage provider|object size mismatch|Can't read block from disk|db connect: rocksdb: open:|panic: pebble: closed" "$target_scan_log_2"; then
   scan_log_status="corrupt"
 fi
 
 python3 - <<'PY' \
   "$MODE" \
   "$prod_status_1" "$staging_status_1" "$prod_status_2" "$staging_status_2" \
-  "$scanner_health_1" "$scanner_health_2" "$scanner_meta_1" "$scanner_meta_2" \
+  "$target_meta_1" "$target_meta_2" "$target_node_1" "$target_node_2" \
+  "$target_scanner_1" "$target_scanner_2" "$target_payserver_1" "$target_payserver_2" \
   "$prod_health_code" "$staging_redirect_code" "$staging_health_code" \
   "$prod_admin_redirect_code" "$prod_admin_token_code" "$staging_admin_token_code" \
   "$invoice_status" "$invoice_public_status" "$scan_log_status"
@@ -345,10 +420,14 @@ import sys
     staging_status_1_path,
     prod_status_2_path,
     staging_status_2_path,
-    scanner_health_1_path,
-    scanner_health_2_path,
-    scanner_meta_1_path,
-    scanner_meta_2_path,
+    target_meta_1_path,
+    target_meta_2_path,
+    target_node_1_path,
+    target_node_2_path,
+    target_scanner_1_path,
+    target_scanner_2_path,
+    target_payserver_1_path,
+    target_payserver_2_path,
     prod_health_code,
     staging_redirect_code,
     staging_health_code,
@@ -360,18 +439,17 @@ import sys
     scan_log_status,
 ) = sys.argv[1:]
 
-with open(prod_status_1_path, "r", encoding="utf-8") as f:
-    prod_1 = (json.load(f).get("data") or {})
-with open(staging_status_1_path, "r", encoding="utf-8") as f:
-    staging_1 = (json.load(f).get("data") or {})
-with open(prod_status_2_path, "r", encoding="utf-8") as f:
-    prod_2 = (json.load(f).get("data") or {})
-with open(staging_status_2_path, "r", encoding="utf-8") as f:
-    staging_2 = (json.load(f).get("data") or {})
-with open(scanner_health_1_path, "r", encoding="utf-8") as f:
-    scanner_health_1 = json.load(f)
-with open(scanner_health_2_path, "r", encoding="utf-8") as f:
-    scanner_health_2 = json.load(f)
+
+def load_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = f.read().strip()
+        if not raw:
+            return {}
+        return json.loads(raw)
+    except Exception:
+        return {}
+
 
 def load_meta(path):
     out = {}
@@ -383,48 +461,65 @@ def load_meta(path):
             out[key] = value
     return out
 
-scanner_meta_1 = load_meta(scanner_meta_1_path)
-scanner_meta_2 = load_meta(scanner_meta_2_path)
 
-def pick_height(doc):
-    chain = doc.get("chain") or {}
-    return chain.get("best_height", doc.get("chain_height"))
+def load_height(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = f.read().strip()
+        if raw == "":
+            return None
+        return int(raw)
+    except Exception:
+        return None
+
+
+def pick_status_data(doc):
+    return (doc or {}).get("data") or {}
+
+
+def pick_chain_height(doc):
+    return ((doc.get("chain") or {}).get("best_height"))
+
 
 def pick_cursor(doc):
-    scanner = doc.get("scanner") or {}
-    return scanner.get("last_cursor_applied")
+    return ((doc.get("scanner") or {}).get("last_cursor_applied"))
+
 
 def pick_pending(doc):
-    delivery = doc.get("event_delivery") or {}
-    return delivery.get("pending_deliveries")
+    return ((doc.get("event_delivery") or {}).get("pending_deliveries"))
+
 
 def pick_scanner_connected(doc):
-    scanner = doc.get("scanner") or {}
-    return scanner.get("connected", doc.get("scanner_connected"))
+    return ((doc.get("scanner") or {}).get("connected"))
+
 
 def pick_scanned_height(doc):
     return doc.get("scanned_height")
 
-prod_height_1 = pick_height(prod_1)
-staging_height_1 = pick_height(staging_1)
-prod_height_2 = pick_height(prod_2)
-staging_height_2 = pick_height(staging_2)
-target_chain_height_1 = max(prod_height_1 or 0, staging_height_1 or 0)
-target_chain_height_2 = max(prod_height_2 or 0, staging_height_2 or 0)
-prod_cursor_1 = pick_cursor(prod_1)
-staging_cursor_1 = pick_cursor(staging_1)
-prod_cursor_2 = pick_cursor(prod_2)
-staging_cursor_2 = pick_cursor(staging_2)
-prod_pending_2 = pick_pending(prod_2)
-staging_pending_2 = pick_pending(staging_2)
-prod_scanner_connected_2 = pick_scanner_connected(prod_2)
-staging_scanner_connected_2 = pick_scanner_connected(staging_2)
-scanner_tip_1 = pick_scanned_height(scanner_health_1)
-scanner_tip_2 = pick_scanned_height(scanner_health_2)
-scanner_container_1 = scanner_meta_1.get("container_id")
-scanner_container_2 = scanner_meta_2.get("container_id")
-scanner_started_at_1 = scanner_meta_1.get("started_at")
-scanner_started_at_2 = scanner_meta_2.get("started_at")
+
+prod_1 = pick_status_data(load_json(prod_status_1_path))
+prod_2 = pick_status_data(load_json(prod_status_2_path))
+staging_1 = pick_status_data(load_json(staging_status_1_path))
+staging_2 = pick_status_data(load_json(staging_status_2_path))
+target_pay_1 = pick_status_data(load_json(target_payserver_1_path))
+target_pay_2 = pick_status_data(load_json(target_payserver_2_path))
+target_scan_1 = load_json(target_scanner_1_path)
+target_scan_2 = load_json(target_scanner_2_path)
+target_meta_1 = load_meta(target_meta_1_path)
+target_meta_2 = load_meta(target_meta_2_path)
+target_node_1 = load_height(target_node_1_path)
+target_node_2 = load_height(target_node_2_path)
+
+prod_height_1 = pick_chain_height(prod_1)
+prod_height_2 = pick_chain_height(prod_2)
+staging_public_height_1 = pick_chain_height(staging_1)
+staging_public_height_2 = pick_chain_height(staging_2)
+target_cursor_1 = pick_cursor(target_pay_1)
+target_cursor_2 = pick_cursor(target_pay_2)
+target_pending_2 = pick_pending(target_pay_2)
+target_scanner_connected_2 = pick_scanner_connected(target_pay_2)
+target_scanner_tip_1 = pick_scanned_height(target_scan_1)
+target_scanner_tip_2 = pick_scanned_height(target_scan_2)
 
 print(f"mode={mode}")
 print(f"prod_health_code={prod_health_code}")
@@ -434,29 +529,23 @@ print(f"prod_admin_redirect_without_token={prod_admin_redirect_code}")
 print(f"prod_admin_code_with_token={prod_admin_token_code}")
 print(f"staging_admin_code_with_token={staging_admin_token_code}")
 print(f"initial_prod_height={prod_height_1}")
-print(f"initial_staging_height={staging_height_1}")
 print(f"final_prod_height={prod_height_2}")
-print(f"final_staging_height={staging_height_2}")
-print(f"initial_height_lag={(prod_height_1 or 0) - (staging_height_1 or 0)}")
-print(f"final_height_lag={(prod_height_2 or 0) - (staging_height_2 or 0)}")
-print(f"initial_staging_scanner_scanned_height={scanner_tip_1}")
-print(f"final_staging_scanner_scanned_height={scanner_tip_2}")
-print(f"initial_scanner_tip_lag={target_chain_height_1 - (scanner_tip_1 or 0)}")
-print(f"final_scanner_tip_lag={target_chain_height_2 - (scanner_tip_2 or 0)}")
-print(f"initial_prod_last_cursor_applied={prod_cursor_1}")
-print(f"initial_staging_last_cursor_applied={staging_cursor_1}")
-print(f"final_prod_last_cursor_applied={prod_cursor_2}")
-print(f"final_staging_last_cursor_applied={staging_cursor_2}")
-print(f"initial_cursor_lag={(prod_cursor_1 or 0) - (staging_cursor_1 or 0)}")
-print(f"final_cursor_lag={(prod_cursor_2 or 0) - (staging_cursor_2 or 0)}")
-print(f"final_prod_pending_deliveries={prod_pending_2}")
-print(f"final_staging_pending_deliveries={staging_pending_2}")
-print(f"final_prod_scanner_connected={prod_scanner_connected_2}")
-print(f"final_staging_scanner_connected={staging_scanner_connected_2}")
-print(f"initial_scanner_container_id={scanner_container_1}")
-print(f"final_scanner_container_id={scanner_container_2}")
-print(f"initial_scanner_started_at={scanner_started_at_1}")
-print(f"final_scanner_started_at={scanner_started_at_2}")
+print(f"initial_staging_public_height={staging_public_height_1}")
+print(f"final_staging_public_height={staging_public_height_2}")
+print(f"initial_target_node_height={target_node_1}")
+print(f"final_target_node_height={target_node_2}")
+print(f"initial_target_scanner_tip={target_scanner_tip_1}")
+print(f"final_target_scanner_tip={target_scanner_tip_2}")
+print(f"initial_target_cursor={target_cursor_1}")
+print(f"final_target_cursor={target_cursor_2}")
+print(f"final_target_pending_deliveries={target_pending_2}")
+print(f"final_target_scanner_connected={target_scanner_connected_2}")
+print(f"junocashd_state_status={target_meta_2.get('junocashd_state_status')}")
+print(f"junocashd_health_status={target_meta_2.get('junocashd_health_status')}")
+print(f"juno_scan_state_status={target_meta_2.get('juno_scan_state_status')}")
+print(f"juno_scan_health_status={target_meta_2.get('juno_scan_health_status')}")
+print(f"juno_pay_server_state_status={target_meta_2.get('juno_pay_server_state_status')}")
+print(f"juno_pay_server_health_status={target_meta_2.get('juno_pay_server_health_status')}")
 print(f"scan_log_status={scan_log_status}")
 print(f"synthetic_invoice_create_status={invoice_status}")
 print(f"synthetic_invoice_public_status={invoice_public_status}")
@@ -467,59 +556,78 @@ if prod_health_code != "200":
     errors.append("production health check failed")
 if staging_redirect_code not in {"302", "303"}:
     errors.append("staging did not redirect unauthenticated requests to Access")
-if staging_health_code != "200":
-    errors.append("staging health check with Access token failed")
 if prod_admin_redirect_code not in {"302", "303"}:
     errors.append("production admin path is not Access-protected")
 if prod_admin_token_code not in {"200", "401"}:
     errors.append("production admin path with Access token returned an unexpected status")
 if staging_admin_token_code not in {"200", "401"}:
     errors.append("staging admin path with Access token returned an unexpected status")
-if prod_scanner_connected_2 is not True:
-    errors.append("production scanner is not connected")
-if staging_scanner_connected_2 is not True:
-    errors.append("staging scanner is not connected")
-if scanner_tip_2 is None:
-    errors.append("staging juno-scan health did not report scanned_height")
+if staging_health_code != "200":
+    errors.append("staging health check with Access token failed")
+if target_meta_2.get("junocashd_health_status") != "healthy":
+    errors.append("target junocashd is not healthy")
+if target_node_2 is None:
+    errors.append("target junocashd height is unavailable")
+if target_meta_2.get("juno_scan_state_status") != "running":
+    errors.append("target juno-scan container is not running")
+if target_scanner_tip_2 is None:
+    errors.append("target juno-scan health did not report scanned_height")
+if target_scanner_connected_2 is not True:
+    errors.append("target pay-server does not report scanner connected")
+if target_pending_2 not in {0, None}:
+    errors.append("target pay-server has pending deliveries")
 if scan_log_status == "corrupt":
-    errors.append("juno-scan logs show RocksDB corruption or block-read errors")
+    errors.append("juno-scan logs show RocksDB corruption, block-read errors, or a fresh pebble panic")
 if invoice_status != "not-run" and invoice_status not in {"200", "201"}:
     errors.append("synthetic invoice creation failed")
 if invoice_public_status != "not-run" and invoice_public_status != "200":
     errors.append("synthetic public invoice fetch failed")
 
-if mode == "warm":
-    if (prod_height_2 or 0) != (staging_height_2 or 0):
-        errors.append("warm validation requires staging height parity")
-    if scanner_container_1 and scanner_container_2 and scanner_container_1 != scanner_container_2:
-        errors.append("warm validation observed a juno-scan container restart during the progress window")
-    if scanner_tip_2 is None:
-        errors.append("warm validation requires a staging scanner tip")
-    else:
-        scanner_progressed = False
-        if scanner_tip_1 is not None and scanner_tip_2 > scanner_tip_1:
-            scanner_progressed = True
-        if scanner_tip_2 >= target_chain_height_2:
-            scanner_progressed = True
-        if not scanner_progressed:
-            errors.append("warm validation requires staging scanner tip progress or full parity")
-    if staging_cursor_2 is None:
-        errors.append("warm validation requires a staging scan cursor")
-    else:
-        progressed = False
-        if staging_cursor_1 is not None and staging_cursor_2 > staging_cursor_1:
-            progressed = True
-        if scanner_tip_2 is not None and scanner_tip_2 >= target_chain_height_2 and staging_cursor_2 > 0:
-            progressed = True
-        if not progressed:
-            errors.append("warm validation requires staging cursor progress or a stable non-zero cursor after scanner tip convergence")
+if mode == "bootstrap":
+    prod_tip = prod_height_2 or 0
+    node_progressed = False
+    if target_node_1 is not None and target_node_2 is not None and target_node_2 > target_node_1:
+        node_progressed = True
+    if target_node_2 is not None and target_node_2 >= prod_tip:
+        node_progressed = True
+    if not node_progressed:
+        errors.append("bootstrap validation requires target node height progress or production parity")
+
+    scan_progressed = False
+    if target_scanner_tip_1 is not None and target_scanner_tip_2 is not None and target_scanner_tip_2 > target_scanner_tip_1:
+        scan_progressed = True
+    if target_scanner_tip_2 is not None and target_node_2 is not None and target_scanner_tip_2 >= target_node_2:
+        scan_progressed = True
+    if not scan_progressed:
+        errors.append("bootstrap validation requires scanner tip progress or parity with the target node")
+
+    cursor_progressed = False
+    if target_cursor_1 is not None and target_cursor_2 is not None and target_cursor_2 > target_cursor_1:
+        cursor_progressed = True
+    if target_cursor_2 is not None and target_cursor_2 > 0 and target_scanner_tip_2 is not None:
+        cursor_progressed = True
+    cursor_started = (target_cursor_1 or 0) > 0 or (target_cursor_2 or 0) > 0
+    if cursor_started and not cursor_progressed:
+        errors.append("bootstrap validation requires pay-server cursor progress or a stable non-zero cursor")
+elif mode == "warm":
+    if (target_node_2 or 0) != (prod_height_2 or 0):
+        errors.append("warm validation requires target node height parity with production")
+    if (target_scanner_tip_2 or 0) < (target_node_2 or 0):
+        errors.append("warm validation requires scanner tip parity with the target node")
+    cursor_progressed = False
+    if target_cursor_1 is not None and target_cursor_2 is not None and target_cursor_2 > target_cursor_1:
+        cursor_progressed = True
+    if target_cursor_2 is not None and target_cursor_2 > 0 and (target_scanner_tip_2 or 0) >= (target_node_2 or 0):
+        cursor_progressed = True
+    if not cursor_progressed:
+        errors.append("warm validation requires replay cursor progress or a stable non-zero cursor after scanner parity")
 else:
-    if (prod_height_2 or 0) != (staging_height_2 or 0):
-        errors.append("final validation requires height parity")
-    if (scanner_tip_2 or 0) < target_chain_height_2:
-        errors.append("final validation requires scanner tip parity")
-    if (prod_cursor_2 or 0) != (staging_cursor_2 or 0):
-        errors.append("final validation requires cursor parity")
+    if (target_node_2 or 0) != (prod_height_2 or 0):
+        errors.append("final validation requires target node height parity with production")
+    if (target_scanner_tip_2 or 0) < (target_node_2 or 0):
+        errors.append("final validation requires scanner tip parity with the target node")
+    if target_cursor_2 is None or target_cursor_2 <= 0:
+        errors.append("final validation requires a non-zero replay cursor")
 
 if errors:
     for err in errors:

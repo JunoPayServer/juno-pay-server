@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 HELPER_SCRIPT_PATH="$SCRIPT_DIR/helper-snapshot-stream.sh"
-WARM_RESET_SCRIPT_PATH="$SCRIPT_DIR/../../do/scripts/rebuild-staging-scan-state.sh"
+PAYSERVER_REPLAY_SCRIPT_PATH="$SCRIPT_DIR/../../do/scripts/rebuild-staging-scan-state.sh"
 
 usage() {
   cat <<'EOF'
@@ -59,7 +59,7 @@ HELPER_WAS_RUNNING=0
 HELPER_STARTED_BY_SCRIPT=0
 DO_FIREWALL_RULE_ADDED=0
 HELPER_EGRESS_CIDR=""
-TARGET_CORE_STOPPED=0
+TARGET_PAYSERVER_STOPPED=0
 TARGET_POST_SYNC_COMPLETED=0
 
 while [[ $# -gt 0 ]]; do
@@ -172,8 +172,8 @@ if [[ ! -f "$HELPER_SCRIPT_PATH" ]]; then
   exit 2
 fi
 
-if [[ ! -f "$WARM_RESET_SCRIPT_PATH" ]]; then
-  echo "warm reset script missing: $WARM_RESET_SCRIPT_PATH" >&2
+if [[ ! -f "$PAYSERVER_REPLAY_SCRIPT_PATH" ]]; then
+  echo "payserver replay script missing: $PAYSERVER_REPLAY_SCRIPT_PATH" >&2
   exit 2
 fi
 
@@ -209,8 +209,8 @@ cleanup() {
     aws ec2 wait instance-stopped --region "$REGION" --instance-ids "$HELPER_INSTANCE_ID" >/dev/null 2>&1 || true
   fi
 
-  if [[ "$TARGET_CORE_STOPPED" == "1" && "$TARGET_POST_SYNC_COMPLETED" == "0" ]]; then
-    echo "warning: target core services may still be stopped or inconsistent on ${TARGET_HOST}" >&2
+  if [[ "$TARGET_PAYSERVER_STOPPED" == "1" && "$TARGET_POST_SYNC_COMPLETED" == "0" ]]; then
+    echo "warning: juno-pay-server may still be stopped or inconsistent on ${TARGET_HOST}" >&2
   fi
 }
 
@@ -443,7 +443,7 @@ run_helper_snapshot_stream() {
   ssm_wait_capture "$cmd_id" "$HELPER_INSTANCE_ID" >/dev/null
 }
 
-stop_target_core_services() {
+stop_target_payserver() {
   target_ssh bash -se -- "$TARGET_DEPLOY_ROOT" <<'EOF'
 set -euo pipefail
 
@@ -451,29 +451,15 @@ ROOT="$1"
 COMPOSE_PATH="${ROOT}/docker-compose.yml"
 RUNTIME_ENV_PATH="${ROOT}/runtime.env"
 
-docker compose --env-file "$RUNTIME_ENV_PATH" -f "$COMPOSE_PATH" stop juno-pay-server juno-scan junocashd >/dev/null
+docker compose --env-file "$RUNTIME_ENV_PATH" -f "$COMPOSE_PATH" stop juno-pay-server >/dev/null || true
 EOF
-  TARGET_CORE_STOPPED=1
+  TARGET_PAYSERVER_STOPPED=1
 }
 
-start_target_core_services() {
-  target_ssh bash -se -- "$TARGET_DEPLOY_ROOT" <<'EOF'
-set -euo pipefail
-
-ROOT="$1"
-COMPOSE_PATH="${ROOT}/docker-compose.yml"
-RUNTIME_ENV_PATH="${ROOT}/runtime.env"
-
-docker compose --env-file "$RUNTIME_ENV_PATH" -f "$COMPOSE_PATH" up -d junocashd juno-scan juno-pay-server >/dev/null
-EOF
+run_target_payserver_replay() {
+  target_ssh bash -se -- --mode replay --root "$TARGET_DEPLOY_ROOT" < "$PAYSERVER_REPLAY_SCRIPT_PATH"
   TARGET_POST_SYNC_COMPLETED=1
-  TARGET_CORE_STOPPED=0
-}
-
-run_target_warm_rebuild() {
-  target_ssh bash -se -- --root "$TARGET_DEPLOY_ROOT" < "$WARM_RESET_SCRIPT_PATH"
-  TARGET_POST_SYNC_COMPLETED=1
-  TARGET_CORE_STOPPED=0
+  TARGET_PAYSERVER_STOPPED=0
 }
 
 detach_and_delete_temp_volume() {
@@ -534,14 +520,10 @@ HELPER_EGRESS_CIDR="$(helper_exec_capture "curl -fsS https://checkip.amazonaws.c
 ensure_do_firewall_rule
 create_snapshot_if_needed
 create_and_attach_temp_volume
-stop_target_core_services
+stop_target_payserver
 run_helper_snapshot_stream
 detach_and_delete_temp_volume
-if [[ "$SNAPSHOT_KIND" == "warm" ]]; then
-  run_target_warm_rebuild
-else
-  start_target_core_services
-fi
+run_target_payserver_replay
 run_readiness_check_if_requested
 delete_prior_snapshot_if_requested
 

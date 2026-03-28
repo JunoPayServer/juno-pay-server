@@ -26,7 +26,8 @@ Current mutable-state migration defaults as of `2026-03-28`:
 
 - primary path: snapshot-derived helper sync from `vol-0d5701021c67b3f7d`
 - helper host: `i-06f8b5e5c0aa7dece` (`juno-prod-desktop-signer`)
-- final cutover path: cold snapshot after AWS stop
+- sync scope: `juno-pay-server` state only
+- final cutover path: cold pay-server snapshot after AWS stop
 - source-host SSH repair is fallback only
 
 Observed source-access blockers on the live source host:
@@ -55,13 +56,14 @@ The script:
 - mounts that temporary volume read-only on the helper
 - detects the helper egress IP and temporarily opens `22/tcp` on the DO firewall for that `/32`
 - copies the existing DO SSH private key to the helper for the sync only
-- stops the DO core services before applying synced state
-- streams `junocashd` and `juno-pay-server` during `warm` syncs
-- streams `junocashd`, `juno-scan`, and `juno-pay-server` during `cold` syncs
-- rebuilds `juno-scan` on staging after every warm sync by wiping `/opt/juno-pay/data/juno-scan/db`, resetting `scan_cursors` in `/opt/juno-pay/data/juno-pay-server/state.sqlite`, re-registering merchant wallets, and backfilling each wallet history through the warmed chain tip
+- stops only `juno-pay-server` before applying restored state
+- streams only `/opt/juno-pay/data/juno-pay-server` during both `warm` and `cold` syncs
+- re-owns the restored pay-server tree to `10001:65534`
+- resets `scan_cursors` after every restore
+- replays pay-server state from the already-running DO-native scanner
 - removes the temporary DO firewall rule, deletes the temporary sync volume, and optionally stops the helper
 
-Use `--snapshot-kind cold` during the final maintenance window after the AWS source instance is stopped.
+Use `--snapshot-kind cold` during the final maintenance window after the AWS source instance is stopped. `warm` versus `cold` now affects snapshot timing only.
 
 If a run is interrupted after the snapshot is already created, resume from that snapshot with:
 
@@ -73,13 +75,29 @@ deploy/aws/scripts/sync-data-volume-snapshot.sh \
 
 If a warm sync succeeds, keep its snapshot until the next successful warm sync. The script prints `snapshot_id=...` so the previous warm snapshot can be deleted on the next successful run with `--delete-snapshot-id`.
 
-Live warm snapshots of `juno-scan` are no longer considered safe. Treat `juno-scan` as rebuildable cache during warm-up and authoritative state only during the final cold cutover sync.
+Do not copy AWS `junocashd` or AWS `juno-scan` state to DO again. The native DO node/scanner path is now the only supported staging and cutover preparation path.
 
-Do not queue a second warm snapshot on top of an unconverged staging rebuild. After each warm sync:
+If DO staging needs a full native rebuild, run:
 
-1. let staging `juno-scan` rebuild from the warmed chain data
-2. monitor `juno-scan /v1/health` `scanned_height` and pay-server `last_cursor_applied`
-3. confirm the current rebuild converges cleanly
+```bash
+ssh root@159.203.150.96 'bash -se -- --root /opt/juno-pay' \
+  < deploy/do/scripts/recover-native-staging.sh
+```
+
+Then validate with bootstrap readiness:
+
+```bash
+deploy/do/scripts/check-cutover-readiness.sh \
+  --mode bootstrap \
+  --service-token-file tmp/cloudflare-access-service-token.json \
+  --target-ssh-key <path-to-existing-do-ssh-key>
+```
+
+Do not queue a second warm snapshot on top of an unconverged staging replay. After each pay-server warm sync:
+
+1. keep the DO node and DO scanner running continuously
+2. reset `scan_cursors` and replay pay-server state from the DO scanner
+3. confirm warm readiness converges cleanly
 4. only then resume the 24-hour warm-sync cadence
 
 ## Source-access fallback workflow
@@ -112,7 +130,7 @@ Use this only in a planned maintenance window because it requires stopping the s
 6. Re-run `deploy/aws/scripts/check-source-access.sh` until either SSM or SSH is verified.
 7. Remove any temporary SSH exposure after validation.
 
-Once shell access is restored, move immediately to the first warm sync with `deploy/do/scripts/sync-state-stream.sh`.
+Once shell access is restored, do not resume the old direct-host stream automatically. Revisit the migration plan explicitly before using any host-to-host sync path.
 
 ## Legacy infrastructure reference
 

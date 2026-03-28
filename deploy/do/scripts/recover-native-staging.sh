@@ -4,27 +4,21 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  rebuild-staging-scan-state.sh [options]
+  recover-native-staging.sh [options]
 
 Options:
-  --mode <replay|bootstrap>  Reset mode. Default: replay
-  --root <path>              Deployment root. Default: /opt/juno-pay
-  --backup-dir <path>        SQLite backup directory. Default: <root>/backups/scan-reset
-  --wait-seconds <sec>       Per-service startup wait budget. Default: 300
+  --root <path>          Deployment root. Default: /opt/juno-pay
+  --backup-dir <path>    SQLite backup directory. Default: <root>/backups/scan-reset
+  --wait-seconds <sec>   Per-service startup wait budget. Default: 300
 EOF
 }
 
-MODE="replay"
 ROOT="/opt/juno-pay"
 BACKUP_DIR=""
 WAIT_SECONDS=300
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --mode)
-      MODE="${2:-}"
-      shift 2
-      ;;
     --root)
       ROOT="${2:-}"
       shift 2
@@ -49,16 +43,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "$MODE" != "replay" && "$MODE" != "bootstrap" ]]; then
-  echo "--mode must be replay or bootstrap" >&2
-  exit 2
-fi
-
 COMPOSE_PATH="${ROOT}/docker-compose.yml"
 RUNTIME_ENV_PATH="${ROOT}/runtime.env"
-PAYSERVER_DIR="${ROOT}/data/juno-pay-server"
-STATE_DB_PATH="${ROOT}/data/juno-pay-server/state.sqlite"
-SCAN_DB_PATH="${ROOT}/data/juno-scan/db"
+DATA_DIR="${ROOT}/data"
+JUNOCASHD_DIR="${DATA_DIR}/junocashd"
+SCAN_DIR="${DATA_DIR}/juno-scan"
+SCAN_DB_PATH="${SCAN_DIR}/db"
+PAYSERVER_DIR="${DATA_DIR}/juno-pay-server"
+STATE_DB_PATH="${PAYSERVER_DIR}/state.sqlite"
 BACKUP_DIR="${BACKUP_DIR:-${ROOT}/backups/scan-reset}"
 
 if [[ ! -f "$COMPOSE_PATH" ]]; then
@@ -71,27 +63,12 @@ if [[ ! -f "$RUNTIME_ENV_PATH" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$STATE_DB_PATH" ]]; then
-  echo "state sqlite not found: $STATE_DB_PATH" >&2
-  exit 1
-fi
-
 compose() {
   docker compose --env-file "$RUNTIME_ENV_PATH" -f "$COMPOSE_PATH" "$@"
 }
 
 service_container_id() {
   compose ps -q "$1"
-}
-
-backup_state_db() {
-  local timestamp backup_path
-
-  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-  backup_path="${BACKUP_DIR}/state.sqlite.${timestamp}.bak"
-  mkdir -p "$BACKUP_DIR"
-  cp "$STATE_DB_PATH" "$backup_path"
-  echo "backup_path=$backup_path"
 }
 
 wait_service_ready() {
@@ -149,6 +126,73 @@ PY
     docker logs --tail 80 "$cid" 2>&1 || true
   fi
   exit 1
+}
+
+sqlite_integrity_ok() {
+  if [[ ! -f "$STATE_DB_PATH" ]]; then
+    return 1
+  fi
+
+  python3 - "$STATE_DB_PATH" <<'PY'
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+conn = sqlite3.connect(db_path)
+try:
+    result = conn.execute("PRAGMA integrity_check").fetchone()
+finally:
+    conn.close()
+
+if not result or result[0] != "ok":
+    raise SystemExit(1)
+PY
+}
+
+restore_latest_backup() {
+  local latest_backup timestamp broken_copy
+
+  latest_backup="$(
+    BACKUP_DIR="$BACKUP_DIR" python3 - <<'PY'
+import glob
+import os
+
+pattern = os.path.join(os.environ["BACKUP_DIR"], "state.sqlite.*.bak")
+matches = sorted(glob.glob(pattern))
+print(matches[-1] if matches else "")
+PY
+  )"
+
+  if [[ -z "$latest_backup" ]]; then
+    echo "state sqlite failed integrity check and no backup was found in $BACKUP_DIR" >&2
+    exit 1
+  fi
+
+  mkdir -p "$PAYSERVER_DIR" "$BACKUP_DIR"
+  if [[ -f "$STATE_DB_PATH" ]]; then
+    timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    broken_copy="${BACKUP_DIR}/state.sqlite.invalid.${timestamp}.bak"
+    cp "$STATE_DB_PATH" "$broken_copy"
+    echo "saved_invalid_state=$broken_copy"
+  fi
+
+  cp "$latest_backup" "$STATE_DB_PATH"
+  echo "restored_state_backup=$latest_backup"
+
+  if ! sqlite_integrity_ok; then
+    echo "restored backup is not a valid sqlite database: $latest_backup" >&2
+    exit 1
+  fi
+}
+
+backup_state_db() {
+  local timestamp backup_path
+
+  mkdir -p "$BACKUP_DIR"
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  backup_path="${BACKUP_DIR}/state.sqlite.${timestamp}.bak"
+  cp "$STATE_DB_PATH" "$backup_path"
+  echo "backup_path=$backup_path"
 }
 
 fix_payserver_ownership() {
@@ -245,45 +289,33 @@ for wallet_id, ufvk in wallets:
 PY
 }
 
-run_replay_mode() {
-  backup_state_db
-  compose stop juno-pay-server >/dev/null || true
-  wait_service_ready junocashd
-  wait_service_ready juno-scan
-  fix_payserver_ownership
-  reset_scan_cursors
-  compose up -d juno-pay-server >/dev/null
-  wait_service_ready juno-pay-server
-  echo "mode=replay"
-  echo "payserver_dir=$PAYSERVER_DIR"
-  echo "state_db_path=$STATE_DB_PATH"
-}
+if ! sqlite_integrity_ok; then
+  restore_latest_backup
+fi
 
-run_bootstrap_mode() {
-  backup_state_db
-  compose stop juno-pay-server juno-scan >/dev/null || true
-  rm -rf "$SCAN_DB_PATH"
-  compose up -d junocashd >/dev/null
-  wait_service_ready junocashd
-  compose up -d juno-scan >/dev/null
-  wait_service_ready juno-scan
-  wait_scanner_tip_ready
-  register_wallets_and_backfill
-  fix_payserver_ownership
-  reset_scan_cursors
-  compose up -d juno-pay-server >/dev/null
-  wait_service_ready juno-pay-server
-  echo "mode=bootstrap"
-  echo "scan_db_path=$SCAN_DB_PATH"
-  echo "payserver_dir=$PAYSERVER_DIR"
-  echo "state_db_path=$STATE_DB_PATH"
-}
+backup_state_db
+compose stop juno-pay-server juno-scan junocashd >/dev/null || true
 
-case "$MODE" in
-  replay)
-    run_replay_mode
-    ;;
-  bootstrap)
-    run_bootstrap_mode
-    ;;
-esac
+rm -rf "$JUNOCASHD_DIR" "$SCAN_DB_PATH"
+mkdir -p "$JUNOCASHD_DIR" "$SCAN_DIR" "$PAYSERVER_DIR"
+fix_payserver_ownership
+reset_scan_cursors
+
+compose up -d junocashd >/dev/null
+wait_service_ready junocashd
+
+compose up -d juno-scan >/dev/null
+wait_service_ready juno-scan
+wait_scanner_tip_ready
+
+register_wallets_and_backfill
+
+compose up -d juno-pay-server >/dev/null
+wait_service_ready juno-pay-server
+
+echo "mode=bootstrap"
+echo "recovered_root=$ROOT"
+echo "junocashd_dir=$JUNOCASHD_DIR"
+echo "scan_db_path=$SCAN_DB_PATH"
+echo "payserver_dir=$PAYSERVER_DIR"
+echo "state_db_path=$STATE_DB_PATH"

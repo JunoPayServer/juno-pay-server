@@ -136,42 +136,69 @@ deploy/aws/scripts/sync-data-volume-snapshot.sh \
 
 This uses the AWS helper instance to mount a snapshot-derived copy of the AWS data volume read-only.
 
-Warm syncs stream only:
+Both warm and cold snapshot syncs now stream only:
 
-- `junocashd`
 - `juno-pay-server`
 
-Cold syncs stream:
+`warm` versus `cold` now affects snapshot timing only:
 
-- `junocashd`
-- `juno-scan`
-- `juno-pay-server`
+- `warm`: snapshot while AWS is still live
+- `cold`: snapshot after the AWS source instance is stopped during maintenance
 
-Warm syncs stop the DO core services before applying state, then rebuild `juno-scan` on staging from the warmed chain data by:
+The native DO chain path is now authoritative for staging preparation:
 
-- deleting `/opt/juno-pay/data/juno-scan/db`
-- backing up `/opt/juno-pay/data/juno-pay-server/state.sqlite`
-- deleting all rows from `scan_cursors`
-- re-registering merchant wallets in `juno-scan`
-- calling `POST /v1/wallets/{wallet_id}/backfill` until the scanner has walked the warmed chain history
-- restarting `junocashd`, `juno-scan`, and `juno-pay-server`
+- `junocashd` stays DO-native and keeps syncing from the network
+- `juno-scan` stays DO-native and rebuilds from the DO node
+- every restored `juno-pay-server` tree is re-owned to `10001:65534`
+- every pay-server restore deletes all rows from `scan_cursors`, then replays from the DO scanner
+
+Do not overwrite DO `/opt/juno-pay/data/junocashd` or DO `/opt/juno-pay/data/juno-scan/db` from AWS again.
+
+If staging needs a full native recovery, use:
+
+```bash
+ssh root@159.203.150.96 'bash -se -- --root /opt/juno-pay' \
+  < deploy/do/scripts/recover-native-staging.sh
+```
+
+That workflow:
+
+- validates `state.sqlite` with `PRAGMA integrity_check`
+- restores the latest local SQLite backup if the DB is invalid
+- wipes DO `junocashd` and `juno-scan` caches
+- resets `scan_cursors`
+- starts a fresh DO-native `junocashd`
+- starts a fresh DO-native `juno-scan`
+- re-registers merchant wallets from `state.sqlite`
+- backfills wallet history through `juno-scan`
+- restarts `juno-pay-server`
 
 Standalone replay/reset entrypoint:
 
 ```bash
-ssh root@159.203.150.96 'bash -se -- --root /opt/juno-pay' \
+ssh root@159.203.150.96 'bash -se -- --mode replay --root /opt/juno-pay' \
   < deploy/do/scripts/rebuild-staging-scan-state.sh
 ```
 
-Legacy fallback path if snapshot migration becomes unusable:
+For a full DO-native bootstrap on an already deployed host:
 
 ```bash
-deploy/do/scripts/sync-state-stream.sh \
-  --source-host 18.206.49.27 \
-  --target-host 159.203.150.96
+ssh root@159.203.150.96 'bash -se -- --mode bootstrap --root /opt/juno-pay' \
+  < deploy/do/scripts/rebuild-staging-scan-state.sh
 ```
 
-To compare the current AWS production state against the DO staging state after each warm sync:
+Legacy direct-host sync tooling remains in the repo only as rollback/reference material. Do not use `deploy/do/scripts/sync-state-stream.sh` under the current migration design because it can overwrite DO-native node or scanner state.
+
+Use bootstrap readiness while the native DO node and scanner are still catching up after a full recovery:
+
+```bash
+deploy/do/scripts/check-cutover-readiness.sh \
+  --mode bootstrap \
+  --service-token-file tmp/cloudflare-access-service-token.json \
+  --target-ssh-key <path-to-existing-do-ssh-key>
+```
+
+Once the DO node and scanner are already established, compare the current AWS production state against the DO staging state after each pay-server-only warm sync:
 
 ```bash
 deploy/do/scripts/check-cutover-readiness.sh \
@@ -201,13 +228,20 @@ deploy/do/scripts/check-cutover-readiness.sh \
 
 Warm readiness now checks the live `juno-scan` container directly over SSH and records:
 
+- DO `junocashd` height
 - pay-server cursor progress
 - scanner `scanned_height` progress
 - scanner log health since the current container start
 
-After a warm rebuild, staging cursor IDs are not expected to match production cursor IDs because the scanner event stream is rebuilt locally. Warm validation cares about cursor movement during catch-up, then a stable non-zero cursor once the scanner tip has converged.
+Bootstrap mode is intentionally looser than warm mode:
 
-Do not start another warm snapshot while the current staging rebuild is still catching up. Wait until the current rebuild converges cleanly, then resume the 24-hour warm-sync cadence.
+- the DO node must be healthy and making forward progress
+- the DO scanner must be healthy and making forward progress
+- the pay-server cursor may still be `0` until replay has actual events to apply
+
+After a pay-server replay, staging cursor IDs are not expected to match production cursor IDs because the scanner event stream is rebuilt locally. Warm validation cares about replay convergence against the DO-native scanner, not cursor ID equality with AWS.
+
+Do not start another pay-server warm snapshot while the current staging replay is still catching up. Wait until the current rebuild converges cleanly, then resume the 24-hour warm-sync cadence.
 
 ## GitHub Actions deployment
 

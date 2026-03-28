@@ -15,14 +15,11 @@ SOURCE_DIRS=()
 case "$SNAPSHOT_KIND" in
   warm)
     SOURCE_DIRS=(
-      junocashd
       juno-pay-server
     )
     ;;
   cold)
     SOURCE_DIRS=(
-      junocashd
-      juno-scan
       juno-pay-server
     )
     ;;

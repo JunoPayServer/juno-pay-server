@@ -11,14 +11,15 @@ This runbook assumes:
 - Cloudflare Access is already live for staging and production admin paths.
 - Cloudflare zone SSL mode is already `strict`.
 - Cloudflare Load Balancing is already live with AWS active and DO as healthy standby.
-- Warm syncs and the final cutover sync use snapshot-derived helper transfers from the AWS data volume.
+- Warm syncs and the final cutover sync use snapshot-derived helper transfers of `juno-pay-server` state from the AWS data volume.
+- `junocashd` and `juno-scan` run natively on DO and must not be overwritten from AWS snapshots.
 
 Supporting operator tools:
 
 - snapshot sync orchestration: `deploy/aws/scripts/sync-data-volume-snapshot.sh`
-- source-host access verification fallback: `deploy/aws/scripts/check-source-access.sh`
+- native DO recovery bootstrap: `deploy/do/scripts/recover-native-staging.sh`
 - post-sync readiness comparison: `deploy/do/scripts/check-cutover-readiness.sh`
-- warm replay/reset on DO staging: `deploy/do/scripts/rebuild-staging-scan-state.sh`
+- pay-server replay/bootstrap on DO staging: `deploy/do/scripts/rebuild-staging-scan-state.sh`
 - Cloudflare LB primary switch: `deploy/cloudflare/scripts/switch-lb-primary.sh`
 
 ## 1. Pre-stage the DO host
@@ -50,9 +51,40 @@ Supporting operator tools:
 
    Expand `CADDY_SERVER_NAMES` to `junopayserver.com, www.junopayserver.com, staging.junopayserver.com` only when production traffic is ready to move.
 
-## 2. Warm-sync mutable state from AWS snapshots
+## 2. Recover the DO host onto a native node path
 
-Run the snapshot-derived sync from an operator workstation that has:
+If staging has been damaged by older AWS node/scanner restores, recover it before resuming warm syncs:
+
+```bash
+ssh root@159.203.150.96 'bash -se -- --root /opt/juno-pay' \
+  < deploy/do/scripts/recover-native-staging.sh
+```
+
+This workflow:
+
+- validates `state.sqlite`
+- restores the latest local SQLite backup if integrity fails
+- wipes DO `junocashd` and `juno-scan` caches
+- resets `scan_cursors`
+- starts a clean DO-native `junocashd`
+- starts a clean DO-native `juno-scan`
+- re-registers wallets and backfills them through the DO scanner
+- restarts `juno-pay-server`
+
+Run bootstrap readiness until the native DO node and scanner are clearly advancing:
+
+```bash
+deploy/do/scripts/check-cutover-readiness.sh \
+  --mode bootstrap \
+  --service-token-file tmp/cloudflare-access-service-token.json \
+  --target-ssh-key <path-to-existing-do-ssh-key>
+```
+
+Do not run another AWS sync until bootstrap readiness is green.
+
+## 3. Warm-sync pay-server state from AWS snapshots
+
+Run the snapshot-derived pay-server sync from an operator workstation that has:
 
 - AWS CLI access
 - `doctl --context juno`
@@ -73,43 +105,31 @@ This flow:
 - creates and attaches a temporary sync volume in `us-east-1a`
 - mounts the snapshot volume read-only on the helper
 - temporarily allows the helper egress `/32` to reach DO SSH
-- stops the DO core services before synced state is applied
-- copies `junocashd` and `juno-pay-server` during warm syncs
-- rebuilds `juno-scan` on staging after warm syncs by wiping the scanner DB, deleting all `scan_cursors`, re-registering wallets, and backfilling wallet history through the warmed chain tip
-- copies `junocashd`, `juno-scan`, and `juno-pay-server` during the final cold sync
+- stops only `juno-pay-server` before the restored SQLite tree is applied
+- copies only `/opt/juno-pay/data/juno-pay-server`
+- re-owns the restored pay-server tree to `10001:65534`
+- deletes all rows from `scan_cursors`
+- replays pay-server state from the already-running DO scanner
 - removes the temporary DO firewall rule and deletes the temporary sync volume
 
 If a sync is interrupted after the snapshot is already created, resume from it with `--snapshot-id <existing-snapshot-id>` instead of starting over.
-
-Warm sync no longer depends on shell access to the live AWS source host.
-
-Source-host SSH recovery is fallback only. Use it only if the snapshot path becomes unusable:
-
-```bash
-deploy/aws/scripts/check-source-access.sh \
-  --instance-id i-0fe82490b2e05db4e \
-  --security-group-id sg-0595fddf6f6561904 \
-  --instance-ip 18.206.49.27 \
-  --region us-east-1 \
-  --ssh-private-key ~/.ssh/id_ed25519 \
-  --use-ec2-instance-connect
-```
 
 Repeat the warm sync until the final maintenance window.
 
 Recommended cadence:
 
-- run the first warm sync immediately
-- do not start another warm sync until the current staging rebuild has converged cleanly
-- once a warm rebuild converges, repeat every 24 hours until cutover
-- run an extra warm sync after any production-side change that affects mutable state
+- keep DO `junocashd` and `juno-scan` running continuously
+- once the native DO node/scanner are converged, run one pay-server-only warm sync
+- require warm readiness to pass
+- repeat once more after roughly 24 hours
+- do not schedule cutover unless two pay-server-only warm cycles reconverge cleanly
 
 Snapshot retention:
 
 - keep the latest successful warm snapshot until the next warm sync succeeds
 - delete the previous warm snapshot on the next successful run with `--delete-snapshot-id <old-snapshot-id>`
 
-## 3. Validate staging
+## 4. Validate staging
 
 Before any production cutover:
 
@@ -136,14 +156,16 @@ Add `--merchant-api-key <merchant-api-key>` when you want the scripted synthetic
 
 The warm-mode readiness check now validates:
 
+- DO node parity or near-parity with production
+- DO scanner parity with the DO node
 - pay-server health and Access behavior
-- pay-server cursor progress, or a stable non-zero cursor after scanner-tip convergence
-- `juno-scan` `scanned_height` progress from the live container
+- pay-server replay convergence, or a stable non-zero cursor after scanner-tip convergence
+- `juno-scan` `scanned_height` from the live container
 - `juno-scan` logs since the current container start
 
-Do not treat container health alone as sufficient after a warm rebuild. Warm staging is only usable when the warm-mode readiness check passes, and no new warm snapshot should be taken while the current rebuild is still converging.
+Do not treat container health alone as sufficient. Warm staging is only usable when the warm-mode readiness check passes, and no new warm snapshot should be taken while the current replay is still converging.
 
-## 4. Final maintenance window
+## 5. Final maintenance window
 
 1. Confirm the Cloudflare load balancer, monitor, and both pools are still healthy with AWS active and DO standby.
 2. Enable maintenance mode at the edge.
@@ -157,8 +179,9 @@ Do not treat container health alone as sufficient after a warm rebuild. Warm sta
      --readiness-service-token-file tmp/cloudflare-access-service-token.json
    ```
 
-5. Start or restart the DO stack if needed.
-6. Validate on DO:
+5. Let the pay-server replay finish against the already-synced DO node and DO scanner.
+6. Start or restart the DO stack if needed.
+7. Validate on DO:
    - `/v1/health`
    - `/v1/status`
    - admin login
@@ -172,8 +195,8 @@ Do not treat container health alone as sufficient after a warm rebuild. Warm sta
        --target-ssh-key <path-to-existing-do-ssh-key>
      ```
 
-7. Switch the Cloudflare load balancer active pool from AWS to DO.
-8. Remove maintenance mode only after DO validation passes.
+8. Switch the Cloudflare load balancer active pool from AWS to DO.
+9. Remove maintenance mode only after DO validation passes.
 
 To promote DO with the current Cloudflare global-key fallback:
 
@@ -181,7 +204,7 @@ To promote DO with the current Cloudflare global-key fallback:
 deploy/cloudflare/scripts/switch-lb-primary.sh --target do --exclusive
 ```
 
-## 5. Rollback window
+## 6. Rollback window
 
 - Keep AWS stopped and out of traffic for 72 hours.
 - Treat DO as the source of truth after reopening writes.
@@ -195,7 +218,7 @@ deploy/cloudflare/scripts/switch-lb-primary.sh --target do --exclusive
     deploy/cloudflare/scripts/switch-lb-primary.sh --target aws
     ```
 
-## 6. Final decommission
+## 7. Final decommission
 
 After 72 stable hours:
 
