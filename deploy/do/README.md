@@ -156,3 +156,4 @@ The workflow:
 - uses Cloudflare Origin CA certs for Caddy when `CADDY_ORIGIN_CERT_PEM_B64` and `CADDY_ORIGIN_KEY_PEM_B64` are present
 - defaults to staging-only certificate issuance with `caddy_server_names=staging.junopayserver.com`
 - checks `/v1/health` and `/v1/status` over HTTPS against the DO reserved IP using the configured `verify_host`
+- trusts Cloudflare Origin CA roots during direct-origin verification when Origin CA cert secrets are configured

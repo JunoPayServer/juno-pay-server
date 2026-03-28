@@ -187,9 +187,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl --retry 20 --retry-delay 5 --retry-connrefused --fail --show-error \
-            --resolve "${VERIFY_HOST}:443:${DO_HOST}" \
-            "https://${VERIFY_HOST}/v1/health"
-          curl --retry 20 --retry-delay 5 --retry-connrefused --fail --show-error \
-            --resolve "${VERIFY_HOST}:443:${DO_HOST}" \
-            "https://${VERIFY_HOST}/v1/status"
+          curl_args=(
+            --retry 20
+            --retry-delay 5
+            --retry-connrefused
+            --fail
+            --show-error
+            --resolve "${VERIFY_HOST}:443:${DO_HOST}"
+          )
+
+          # Direct-origin probes need Cloudflare's private Origin CA roots when Caddy
+          # serves an Origin CA certificate instead of a browser-trusted certificate.
+          if [[ -n "${{ secrets.CADDY_ORIGIN_CERT_PEM_B64 }}" ]]; then
+            curl --fail --show-error --silent https://developers.cloudflare.com/ssl/static/origin_ca_ecc_root.pem >/tmp/cloudflare-origin-ca.pem
+            curl --fail --show-error --silent https://developers.cloudflare.com/ssl/static/origin_ca_rsa_root.pem >>/tmp/cloudflare-origin-ca.pem
+            curl_args+=(--cacert /tmp/cloudflare-origin-ca.pem)
+          fi
+
+          curl "${curl_args[@]}" "https://${VERIFY_HOST}/v1/health"
+          curl "${curl_args[@]}" "https://${VERIFY_HOST}/v1/status"
