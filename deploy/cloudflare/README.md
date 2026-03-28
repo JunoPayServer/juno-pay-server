@@ -20,11 +20,26 @@ The DNS records were reconciled during implementation to match the migration pla
 - `www.junopayserver.com A 18.206.49.27` with `proxied=false`
 - `staging.junopayserver.com A 159.203.150.96` with `proxied=false`
 
-Important: the public registrar delegation has **not** been switched yet. Public DNS still resolves through the Route53 nameservers until the registrar is updated to use the Cloudflare nameservers above.
+As of `2026-03-28`, public delegation is already on the Cloudflare nameservers:
+
+- `dig NS junopayserver.com +short` -> `chase.ns.cloudflare.com.`
+- `dig NS junopayserver.com +short` -> `georgia.ns.cloudflare.com.`
+
+Current public resolution still keeps production on AWS while staging points at DO:
+
+- `dig junopayserver.com A +short` -> `18.206.49.27`
+- `dig www.junopayserver.com A +short` -> `18.206.49.27`
+- `dig staging.junopayserver.com A +short` -> `159.203.150.96`
 
 ## Current plugin limitation
 
-The connected Cloudflare plugin can read and mutate DNS, but the implementation hit `10000: Authentication error` for:
+The Cloudflare plugin is currently blocked for follow-on work:
+
+- earlier in implementation, DNS reads and writes succeeded
+- later Access and Load Balancing requests failed with `10000: Authentication error`
+- the latest verification on `2026-03-28` failed with `9109: Invalid access token`
+
+Treat Cloudflare plugin work as unavailable until the app connection is repaired. The blocked areas include:
 
 - Zone-level Access APIs
 - Account-level Zero Trust Access APIs
