@@ -153,6 +153,11 @@ jobs:
         run: |
           set -euo pipefail
 
+          DEMO_MERCHANT_API_KEY="${{ secrets.DEMO_MERCHANT_API_KEY }}"
+          if [[ "${VERIFY_HOST}" == "${STAGING_DOMAIN}" && -n "${{ secrets.DEMO_MERCHANT_API_KEY_STAGING }}" ]]; then
+            DEMO_MERCHANT_API_KEY="${{ secrets.DEMO_MERCHANT_API_KEY_STAGING }}"
+          fi
+
           {
             printf '%s\n' 'ROOT=/opt/juno-pay'
             printf '%s\n' "DOMAIN_NAME=${DOMAIN_NAME}"
@@ -170,7 +175,7 @@ jobs:
             printf '%s\n' "JUNO_SCAN_CONFIRMATIONS=${JUNO_SCAN_CONFIRMATIONS}"
             printf '%s\n' "JUNO_PAY_ADMIN_PASSWORD=${{ secrets.JUNO_PAY_ADMIN_PASSWORD }}"
             printf '%s\n' "JUNO_PAY_TOKEN_KEY_HEX=${{ secrets.JUNO_PAY_TOKEN_KEY_HEX }}"
-            printf '%s\n' "JUNO_PAY_DEMO_MERCHANT_API_KEY=${{ secrets.DEMO_MERCHANT_API_KEY }}"
+            printf '%s\n' "JUNO_PAY_DEMO_MERCHANT_API_KEY=${DEMO_MERCHANT_API_KEY}"
           } >/tmp/juno-pay-do.env
 
           scp /tmp/juno-pay-do.env root@"${DO_HOST}":/tmp/juno-pay-deploy/deploy.env
