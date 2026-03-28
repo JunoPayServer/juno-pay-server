@@ -10,7 +10,8 @@ This runbook assumes:
 - The DO foundation already exists in project `junopayserver`.
 - Cloudflare Access is already live for staging and production admin paths.
 - Cloudflare zone SSL mode is already `strict`.
-- Cloudflare Load Balancing remains the only Cloudflare blocker for production cutover.
+- Cloudflare Load Balancing is already live with AWS active and DO as healthy standby.
+- The remaining blocker before cutover is verified shell access to the AWS source host for the warm sync.
 
 ## 1. Pre-stage the DO host
 
@@ -61,6 +62,15 @@ This copies:
 
 Warm sync requires source-host shell access. If the AWS host blocks SSH, restore temporary operator access before attempting the sync. Do not proceed to production cutover without a verified source access path.
 
+Current source-host blocker observed during implementation:
+
+- port `22/tcp` was not open by default
+- temporary source-side SSH access from the operator workstation reached the host, but none of the available private keys authenticated successfully
+- `ec2-user`, `ubuntu`, `admin`, and `root` were all rejected
+- EC2 Instance Connect accepted the public key push for `ec2-user`, but the host still rejected the login
+
+Resolve the source-host access path before scheduling the cutover window.
+
 Repeat the warm sync until the final maintenance window.
 
 ## 3. Validate staging
@@ -79,7 +89,7 @@ Before any production cutover:
 
 ## 4. Final maintenance window
 
-1. Confirm the Cloudflare load balancer, monitor, and both pools are healthy with AWS active and DO standby.
+1. Confirm the Cloudflare load balancer, monitor, and both pools are still healthy with AWS active and DO standby.
 2. Enable maintenance mode at the edge.
 3. Stop the AWS stack cleanly.
 4. Run one final sync:

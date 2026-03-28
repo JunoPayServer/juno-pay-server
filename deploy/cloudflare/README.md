@@ -16,10 +16,10 @@ The zone already exists in the connected Cloudflare account:
 
 ## Current DNS records in Cloudflare
 
-The DNS records are live and proxied through Cloudflare:
+The public hostnames are live and proxied through Cloudflare:
 
-- `junopayserver.com A 18.206.49.27` with `proxied=true`
-- `www.junopayserver.com A 18.206.49.27` with `proxied=true`
+- `junopayserver.com` is served by a Cloudflare Load Balancer with `proxied=true`
+- `www.junopayserver.com` is served by a Cloudflare Load Balancer with `proxied=true`
 - `staging.junopayserver.com A 159.203.150.96` with `proxied=true`
 
 As of `2026-03-28`, public delegation is already on the Cloudflare nameservers:
@@ -27,11 +27,11 @@ As of `2026-03-28`, public delegation is already on the Cloudflare nameservers:
 - `dig NS junopayserver.com +short` -> `chase.ns.cloudflare.com.`
 - `dig NS junopayserver.com +short` -> `georgia.ns.cloudflare.com.`
 
-Current public resolution still keeps production on AWS while staging points at DO:
+Current public resolution returns Cloudflare anycast IPs for the production names, while staging still points at the DO origin through the proxy:
 
-- `dig junopayserver.com A +short` -> `18.206.49.27`
-- `dig www.junopayserver.com A +short` -> `18.206.49.27`
-- `dig staging.junopayserver.com A +short` -> `159.203.150.96`
+- `dig junopayserver.com A +short` -> Cloudflare anycast IPs
+- `dig www.junopayserver.com A +short` -> Cloudflare anycast IPs
+- `dig staging.junopayserver.com A +short` -> Cloudflare anycast IPs
 
 ## Current Access state
 
@@ -43,90 +43,46 @@ Access is enabled and live:
 - public health, status, invoice, and checkout endpoints remain public
 - the `junopayserver-admin-smoke` service token reaches staging and production admin paths correctly
 
-## Current Load Balancing blocker
+## Current Load Balancing state
 
-Load Balancing remains the hard blocker for production cutover.
+Load Balancing is enabled and live for production hostnames.
 
 Current behavior as of `2026-03-28`:
 
-- the Cloudflare plugin now works for DNS and Access operations
-- the Cloudflare plugin still fails on Load Balancing monitor creation with `10000: Authentication error`
-- the Cloudflare plugin fails on load balancer record creation with `1002: load balancing not enabled for zone: validation failed`
+- the Cloudflare plugin works for DNS and Access operations
+- the Cloudflare plugin still fails on LB writes, so LB resources were created with the temporary global-key fallback
 - the Cloudflare plugin also lacks permission for the zone SSL settings endpoint, so `strict` was set via a temporary global-key API fallback
-- the direct Cloudflare API with the temporary global key can read load balancer resources, but create calls still fail server-side
+- the global-key API path now succeeds for monitor, pool, and LB creation after the product was enabled
 
-Exact direct API failures:
+Current live LB resources:
 
-- monitor create:
+- monitor `d01e47da9cae574c77cffeb5592d7d6c`
+  - type `https`
+  - `GET /v1/health`
+  - `Host: junopayserver.com`
+  - interval `60s`
+- pool `aws_primary` (`4f638d5ea23116d07e1cf1461524a716`)
+  - origin `18.206.49.27`
+  - healthy
+- pool `do_secondary` (`26af9c8e599b3185f6d5dc4a8a283d40`)
+  - origin `159.203.150.96`
+  - healthy
+- load balancer `junopayserver.com` (`429e1bd9e2e202fb83fdc05250fce2ef`)
+- load balancer `www.junopayserver.com` (`0de5f8521b63674960d049ca25e7c8d6`)
 
-  ```json
-  {
-    "result": null,
-    "success": false,
-    "errors": [
-      {
-        "code": 1002,
-        "message": "interval is not in range [0, 0]: validation failed"
-      }
-    ],
-    "messages": []
-  }
-  ```
+Current traffic posture:
 
-- pool create:
+- AWS is first in `default_pools`
+- DO is second in `default_pools`
+- `fallback_pool` is AWS
+- production traffic stays on AWS until the final maintenance window
+- DO is monitored as healthy standby only
 
-  ```json
-  {
-    "result": null,
-    "success": false,
-    "errors": [
-      {
-        "code": 1002,
-        "message": "Internal error creating or modifying pool. Access Failed. Please reach out to Support.: validation failed"
-      }
-    ],
-    "messages": []
-  }
-  ```
+## Remaining Cloudflare caveat
 
-- load balancer record create:
+The remaining Cloudflare gap is connector-only:
 
-  ```json
-  {
-    "result": null,
-    "success": false,
-    "errors": [
-      {
-        "code": 1002,
-        "message": "load balancing not enabled for zone: validation failed"
-      }
-    ],
-    "messages": []
-  }
-  ```
+- the Cloudflare plugin still cannot manage LB writes
+- the Cloudflare plugin still cannot update the zone SSL setting
 
-Because monitor, pool, and load balancer record creation all fail, Cloudflare support must enable or repair Load Balancing on this zone before production cutover.
-
-## Target LB configuration once unblocked
-
-Create:
-
-- one HTTPS health monitor for `GET /v1/health` with `Host: junopayserver.com`
-- pool `aws-primary` -> `18.206.49.27`
-- pool `do-secondary` -> `159.203.150.96`
-- load balancer record for `junopayserver.com`
-- load balancer record for `www.junopayserver.com`
-
-Run pre-cutover with AWS as the active/default pool and DO as the healthy standby pool. Do not send production traffic to DO until the final maintenance window.
-
-## Support escalation payload
-
-Open a Cloudflare support case with:
-
-- zone ID `6a7b914cfaab0d683a7a459dd9990816`
-- account ID `03bd68eb1a12139579231d41799ca768`
-- the exact plugin and direct API errors above
-- the target LB configuration above
-- the note that Access and proxied DNS already work for this zone, while LB create calls fail for both the plugin and direct API paths
-
-Keep the support case in front of any production cutover work. The selected migration path is to wait for LB instead of switching production directly.
+If future LB edits are needed before the plugin permissions are fixed, use the same temporary global-key fallback and document the change in this runbook.
