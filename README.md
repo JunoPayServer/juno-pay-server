@@ -119,14 +119,19 @@ See `api/openapi.yaml` for exact schemas.
 - localStorage-only (no DB)
 - uses `POST /v1/invoices` (merchant API key) + public invoice endpoints
 
-## AWS deployment (reference)
+## Deployment references
 
-A production deployment typically looks like:
-- `junocashd` on EC2 with EBS (stateful).
-- `juno-scan` as a separate service (DB-backed; RocksDB local volume or managed DB).
-- `juno-pay-server` behind an ALB/NLB; secrets in SSM/Secrets Manager; logs to CloudWatch.
-- Optional brokers:
-  - Kafka/MSK for high-volume event fanout
-  - RabbitMQ (Amazon MQ) or NATS (self-hosted) for queue/stream integration
+Primary migration target:
 
-Terraform reference deployment (including optional RDS/MSK patterns) will live under `deploy/aws/terraform/`.
+- DigitalOcean host infrastructure and GHCR-based deployment: `deploy/do/`
+- Cloudflare DNS / migration notes: `deploy/cloudflare/`
+
+Current production migration shape:
+
+- `junocashd` on a single DO Droplet with attached block storage
+- `juno-scan` on the same host with local RocksDB
+- `juno-pay-server` on the same host with local SQLite
+- `caddy` serving the apex, `www`, and staging hostnames
+- Cloudflare staged in front of the origin during the DNS cutover
+
+Legacy AWS reference deployment remains under `deploy/aws/terraform/` until the final cutover and rollback window are complete.

@@ -1,0 +1,173 @@
+name: deploy-do
+
+on:
+  workflow_dispatch:
+    inputs:
+      do_host:
+        description: DigitalOcean reserved IP or host
+        required: true
+        default: 159.203.150.96
+      domain_name:
+        description: Apex domain served by Caddy
+        required: true
+        default: junopayserver.com
+      www_domain:
+        description: WWW domain served by Caddy
+        required: true
+        default: www.junopayserver.com
+      staging_domain:
+        description: Staging hostname served by Caddy
+        required: true
+        default: staging.junopayserver.com
+      image_prefix:
+        description: GHCR image prefix
+        required: true
+        default: juno-pay
+      juno_chain:
+        description: mainnet|testnet|regtest
+        required: true
+        default: mainnet
+      juno_scan_ua_hrp:
+        description: Unified address HRP passed to juno-scan
+        required: true
+        default: j
+      juno_scan_confirmations:
+        description: Confirmations required for confirmed deposit events
+        required: true
+        default: "100"
+      juno_scan_repo:
+        description: Git repo URL for juno-scan build
+        required: true
+        default: https://github.com/junocash-tools/juno-scan.git
+      juno_scan_ref:
+        description: Git ref for juno-scan build
+        required: true
+        default: 8e40d26577be1e946823ab3f380be5baf8a1dccd
+      tag:
+        description: Docker tag (default short SHA)
+        required: false
+      bootstrap_host:
+        description: Run host bootstrap before deploy
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      DO_HOST: ${{ inputs.do_host }}
+      DOMAIN_NAME: ${{ inputs.domain_name }}
+      WWW_DOMAIN: ${{ inputs.www_domain }}
+      STAGING_DOMAIN: ${{ inputs.staging_domain }}
+      IMAGE_PREFIX: ${{ inputs.image_prefix }}
+      JUNO_CHAIN: ${{ inputs.juno_chain }}
+      JUNO_SCAN_UA_HRP: ${{ inputs.juno_scan_ua_hrp }}
+      JUNO_SCAN_CONFIRMATIONS: ${{ inputs.juno_scan_confirmations }}
+      JUNO_SCAN_REPO: ${{ inputs.juno_scan_repo }}
+      JUNO_SCAN_REF: ${{ inputs.juno_scan_ref }}
+      TAG_INPUT: ${{ inputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push images to GHCR
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${TAG_INPUT:-}"
+          if [[ -z "${TAG}" ]]; then
+            TAG="${GITHUB_SHA:0:7}"
+          fi
+
+          chmod +x deploy/do/scripts/build-push-ghcr.sh
+          eval "$(
+            deploy/do/scripts/build-push-ghcr.sh \
+              --owner "${GITHUB_REPOSITORY_OWNER}" \
+              --image-prefix "${IMAGE_PREFIX}" \
+              --tag "${TAG}" \
+              --juno-scan-repo "${JUNO_SCAN_REPO}" \
+              --juno-scan-ref "${JUNO_SCAN_REF}"
+          )"
+
+          {
+            echo "IMAGE_JUNO_PAY_SERVER=${IMAGE_JUNO_PAY_SERVER}"
+            echo "IMAGE_JUNOCASHD=${IMAGE_JUNOCASHD}"
+            echo "IMAGE_JUNO_SCAN=${IMAGE_JUNO_SCAN}"
+            echo "IMAGE_DEMO_APP=${IMAGE_DEMO_APP}"
+            echo "DEPLOY_TAG=${TAG}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DO_SSH_PRIVATE_KEY }}
+
+      - name: Add DO host to known_hosts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${DO_HOST}" >> ~/.ssh/known_hosts
+
+      - name: Upload DO deploy scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -C deploy/do -cf - scripts | ssh root@"${DO_HOST}" 'rm -rf /tmp/juno-pay-deploy && mkdir -p /tmp/juno-pay-deploy && tar -C /tmp/juno-pay-deploy -xf -'
+
+      - name: Bootstrap host
+        if: ${{ inputs.bootstrap_host }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh root@"${DO_HOST}" 'bash /tmp/juno-pay-deploy/scripts/bootstrap-host.sh'
+
+      - name: Deploy stack
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            printf '%s\n' 'ROOT=/opt/juno-pay'
+            printf '%s\n' "DOMAIN_NAME=${DOMAIN_NAME}"
+            printf '%s\n' "WWW_DOMAIN=${WWW_DOMAIN}"
+            printf '%s\n' "STAGING_DOMAIN=${STAGING_DOMAIN}"
+            printf '%s\n' "GHCR_USERNAME=${GITHUB_ACTOR}"
+            printf '%s\n' "GHCR_TOKEN=${{ secrets.GITHUB_TOKEN }}"
+            printf '%s\n' "IMAGE_JUNO_PAY_SERVER=${IMAGE_JUNO_PAY_SERVER}"
+            printf '%s\n' "IMAGE_JUNOCASHD=${IMAGE_JUNOCASHD}"
+            printf '%s\n' "IMAGE_JUNO_SCAN=${IMAGE_JUNO_SCAN}"
+            printf '%s\n' "IMAGE_DEMO_APP=${IMAGE_DEMO_APP}"
+            printf '%s\n' "JUNO_CHAIN=${JUNO_CHAIN}"
+            printf '%s\n' "JUNO_SCAN_UA_HRP=${JUNO_SCAN_UA_HRP}"
+            printf '%s\n' "JUNO_SCAN_CONFIRMATIONS=${JUNO_SCAN_CONFIRMATIONS}"
+            printf '%s\n' "JUNO_PAY_ADMIN_PASSWORD=${{ secrets.JUNO_PAY_ADMIN_PASSWORD }}"
+            printf '%s\n' "JUNO_PAY_TOKEN_KEY_HEX=${{ secrets.JUNO_PAY_TOKEN_KEY_HEX }}"
+            printf '%s\n' "JUNO_PAY_DEMO_MERCHANT_API_KEY=${{ secrets.DEMO_MERCHANT_API_KEY }}"
+          } >/tmp/juno-pay-do.env
+
+          scp /tmp/juno-pay-do.env root@"${DO_HOST}":/tmp/juno-pay-deploy/deploy.env
+          ssh root@"${DO_HOST}" 'set -a && . /tmp/juno-pay-deploy/deploy.env && set +a && bash /tmp/juno-pay-deploy/scripts/deploy-stack.sh'
+
+      - name: Verify health and status on DO origin
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --retry 20 --retry-delay 5 --fail --show-error -H "Host: ${DOMAIN_NAME}" "http://${DO_HOST}/v1/health"
+          curl --retry 20 --retry-delay 5 --fail --show-error -H "Host: ${DOMAIN_NAME}" "http://${DO_HOST}/v1/status"
