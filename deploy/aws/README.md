@@ -100,6 +100,18 @@ Do not queue a second warm snapshot on top of an unconverged staging replay. Aft
 3. confirm warm readiness converges cleanly
 4. only then resume the 24-hour warm-sync cadence
 
+Before the first pay-server warm sync after a native DO recovery, require:
+
+```bash
+deploy/do/scripts/wait-bootstrap-parity.sh \
+  --required-consecutive 2 \
+  --interval-seconds 900 \
+  --service-token-file tmp/cloudflare-access-service-token.json \
+  --target-ssh-key <path-to-existing-do-ssh-key>
+```
+
+Do not take the first pay-server warm snapshot until that gate succeeds.
+
 ## Source-access fallback workflow
 
 If the snapshot path becomes unusable, fall back to the source-access check:

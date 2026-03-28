@@ -19,6 +19,7 @@ Supporting operator tools:
 - snapshot sync orchestration: `deploy/aws/scripts/sync-data-volume-snapshot.sh`
 - native DO recovery bootstrap: `deploy/do/scripts/recover-native-staging.sh`
 - post-sync readiness comparison: `deploy/do/scripts/check-cutover-readiness.sh`
+- bootstrap parity gate: `deploy/do/scripts/wait-bootstrap-parity.sh`
 - pay-server replay/bootstrap on DO staging: `deploy/do/scripts/rebuild-staging-scan-state.sh`
 - Cloudflare LB primary switch: `deploy/cloudflare/scripts/switch-lb-primary.sh`
 
@@ -82,6 +83,16 @@ deploy/do/scripts/check-cutover-readiness.sh \
 
 Do not run another AWS sync until bootstrap readiness is green.
 
+To block automatically until the DO node and scanner have reached production parity in 2 consecutive samples:
+
+```bash
+deploy/do/scripts/wait-bootstrap-parity.sh \
+  --required-consecutive 2 \
+  --interval-seconds 900 \
+  --service-token-file tmp/cloudflare-access-service-token.json \
+  --target-ssh-key <path-to-existing-do-ssh-key>
+```
+
 ## 3. Warm-sync pay-server state from AWS snapshots
 
 Run the snapshot-derived pay-server sync from an operator workstation that has:
@@ -119,7 +130,7 @@ Repeat the warm sync until the final maintenance window.
 Recommended cadence:
 
 - keep DO `junocashd` and `juno-scan` running continuously
-- once the native DO node/scanner are converged, run one pay-server-only warm sync
+- once `wait-bootstrap-parity.sh` succeeds, run one pay-server-only warm sync
 - require warm readiness to pass
 - repeat once more after roughly 24 hours
 - do not schedule cutover unless two pay-server-only warm cycles reconverge cleanly
