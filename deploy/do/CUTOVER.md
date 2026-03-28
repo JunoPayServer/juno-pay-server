@@ -100,7 +100,8 @@ Repeat the warm sync until the final maintenance window.
 Recommended cadence:
 
 - run the first warm sync immediately
-- repeat every 24 hours until cutover
+- do not start another warm sync until the current staging rebuild has converged cleanly
+- once a warm rebuild converges, repeat every 24 hours until cutover
 - run an extra warm sync after any production-side change that affects mutable state
 
 Snapshot retention:
@@ -127,12 +128,20 @@ After each warm sync, run:
 ```bash
 deploy/do/scripts/check-cutover-readiness.sh \
   --mode warm \
-  --service-token-file tmp/cloudflare-access-service-token.json
+  --service-token-file tmp/cloudflare-access-service-token.json \
+  --target-ssh-key <path-to-existing-do-ssh-key>
 ```
 
 Add `--merchant-api-key <merchant-api-key>` when you want the scripted synthetic invoice create/public fetch check in the same run.
 
-Do not treat container health alone as sufficient after a warm rebuild. Warm staging is only usable when the warm-mode readiness check passes.
+The warm-mode readiness check now validates:
+
+- pay-server health and Access behavior
+- pay-server cursor progress, or a stable non-zero cursor after scanner-tip convergence
+- `juno-scan` `scanned_height` progress from the live container
+- `juno-scan` logs since the current container start
+
+Do not treat container health alone as sufficient after a warm rebuild. Warm staging is only usable when the warm-mode readiness check passes, and no new warm snapshot should be taken while the current rebuild is still converging.
 
 ## 4. Final maintenance window
 
@@ -159,7 +168,8 @@ Do not treat container health alone as sufficient after a warm rebuild. Warm sta
      ```bash
      deploy/do/scripts/check-cutover-readiness.sh \
        --mode final \
-       --service-token-file tmp/cloudflare-access-service-token.json
+       --service-token-file tmp/cloudflare-access-service-token.json \
+       --target-ssh-key <path-to-existing-do-ssh-key>
      ```
 
 7. Switch the Cloudflare load balancer active pool from AWS to DO.

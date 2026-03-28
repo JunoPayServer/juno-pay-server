@@ -75,6 +75,13 @@ If a warm sync succeeds, keep its snapshot until the next successful warm sync. 
 
 Live warm snapshots of `juno-scan` are no longer considered safe. Treat `juno-scan` as rebuildable cache during warm-up and authoritative state only during the final cold cutover sync.
 
+Do not queue a second warm snapshot on top of an unconverged staging rebuild. After each warm sync:
+
+1. let staging `juno-scan` rebuild from the warmed chain data
+2. monitor `juno-scan /v1/health` `scanned_height` and pay-server `last_cursor_applied`
+3. confirm the current rebuild converges cleanly
+4. only then resume the 24-hour warm-sync cadence
+
 ## Source-access fallback workflow
 
 If the snapshot path becomes unusable, fall back to the source-access check:

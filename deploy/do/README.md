@@ -176,7 +176,8 @@ To compare the current AWS production state against the DO staging state after e
 ```bash
 deploy/do/scripts/check-cutover-readiness.sh \
   --mode warm \
-  --service-token-file tmp/cloudflare-access-service-token.json
+  --service-token-file tmp/cloudflare-access-service-token.json \
+  --target-ssh-key <path-to-existing-do-ssh-key>
 ```
 
 If you also want the synthetic invoice create/public fetch check in the same run, provide a merchant API key:
@@ -185,6 +186,7 @@ If you also want the synthetic invoice create/public fetch check in the same run
 deploy/do/scripts/check-cutover-readiness.sh \
   --mode warm \
   --service-token-file tmp/cloudflare-access-service-token.json \
+  --target-ssh-key <path-to-existing-do-ssh-key> \
   --merchant-api-key <merchant-api-key>
 ```
 
@@ -193,8 +195,19 @@ For the final cold-sync validation, switch to:
 ```bash
 deploy/do/scripts/check-cutover-readiness.sh \
   --mode final \
-  --service-token-file tmp/cloudflare-access-service-token.json
+  --service-token-file tmp/cloudflare-access-service-token.json \
+  --target-ssh-key <path-to-existing-do-ssh-key>
 ```
+
+Warm readiness now checks the live `juno-scan` container directly over SSH and records:
+
+- pay-server cursor progress
+- scanner `scanned_height` progress
+- scanner log health since the current container start
+
+After a warm rebuild, staging cursor IDs are not expected to match production cursor IDs because the scanner event stream is rebuilt locally. Warm validation cares about cursor movement during catch-up, then a stable non-zero cursor once the scanner tip has converged.
+
+Do not start another warm snapshot while the current staging rebuild is still catching up. Wait until the current rebuild converges cleanly, then resume the 24-hour warm-sync cadence.
 
 ## GitHub Actions deployment
 
