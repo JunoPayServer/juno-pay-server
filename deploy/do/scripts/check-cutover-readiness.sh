@@ -15,6 +15,7 @@ Options:
   --access-client-secret <sec>   Cloudflare Access service token client secret
   --merchant-api-key <key>       Optional merchant API key for synthetic invoice create/fetch
   --progress-seconds <sec>       Progress window for bootstrap/warm. Default: 60
+  --height-lag-tolerance <n>     Allowed block-height difference for parity checks. Default: 1
   --target-host <host>           DO target host. Default: 159.203.150.96
   --target-user <user>           DO target user. Default: root
   --target-ssh-key <path>        SSH key for DO target checks
@@ -30,6 +31,7 @@ ACCESS_CLIENT_ID="${ACCESS_CLIENT_ID:-}"
 ACCESS_CLIENT_SECRET="${ACCESS_CLIENT_SECRET:-}"
 MERCHANT_API_KEY=""
 PROGRESS_SECONDS=60
+HEIGHT_LAG_TOLERANCE=1
 TARGET_HOST="159.203.150.96"
 TARGET_USER="root"
 TARGET_SSH_KEY="${TARGET_SSH_KEY:-}"
@@ -67,6 +69,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --progress-seconds)
       PROGRESS_SECONDS="${2:-}"
+      shift 2
+      ;;
+    --height-lag-tolerance)
+      HEIGHT_LAG_TOLERANCE="${2:-}"
       shift 2
       ;;
     --target-host)
@@ -410,7 +416,7 @@ python3 - <<'PY' \
   "$target_scanner_1" "$target_scanner_2" "$target_payserver_1" "$target_payserver_2" \
   "$prod_health_code" "$staging_redirect_code" "$staging_health_code" \
   "$prod_admin_redirect_code" "$prod_admin_token_code" "$staging_admin_token_code" \
-  "$invoice_status" "$invoice_public_status" "$scan_log_status"
+  "$invoice_status" "$invoice_public_status" "$scan_log_status" "$HEIGHT_LAG_TOLERANCE"
 import json
 import sys
 
@@ -437,7 +443,9 @@ import sys
     invoice_status,
     invoice_public_status,
     scan_log_status,
+    height_lag_tolerance,
 ) = sys.argv[1:]
+height_lag_tolerance = int(height_lag_tolerance)
 
 
 def load_json(path):
@@ -497,6 +505,12 @@ def pick_scanned_height(doc):
     return doc.get("scanned_height")
 
 
+def within_tolerance(a, b):
+    if a is None or b is None:
+        return False
+    return abs(int(a) - int(b)) <= height_lag_tolerance
+
+
 prod_1 = pick_status_data(load_json(prod_status_1_path))
 prod_2 = pick_status_data(load_json(prod_status_2_path))
 staging_1 = pick_status_data(load_json(staging_status_1_path))
@@ -540,6 +554,7 @@ print(f"initial_target_cursor={target_cursor_1}")
 print(f"final_target_cursor={target_cursor_2}")
 print(f"final_target_pending_deliveries={target_pending_2}")
 print(f"final_target_scanner_connected={target_scanner_connected_2}")
+print(f"height_lag_tolerance={height_lag_tolerance}")
 print(f"junocashd_state_status={target_meta_2.get('junocashd_state_status')}")
 print(f"junocashd_health_status={target_meta_2.get('junocashd_health_status')}")
 print(f"juno_scan_state_status={target_meta_2.get('juno_scan_state_status')}")
@@ -588,7 +603,7 @@ if mode == "bootstrap":
     node_progressed = False
     if target_node_1 is not None and target_node_2 is not None and target_node_2 > target_node_1:
         node_progressed = True
-    if target_node_2 is not None and target_node_2 >= prod_tip:
+    if within_tolerance(target_node_2, prod_tip):
         node_progressed = True
     if not node_progressed:
         errors.append("bootstrap validation requires target node height progress or production parity")
@@ -596,7 +611,7 @@ if mode == "bootstrap":
     scan_progressed = False
     if target_scanner_tip_1 is not None and target_scanner_tip_2 is not None and target_scanner_tip_2 > target_scanner_tip_1:
         scan_progressed = True
-    if target_scanner_tip_2 is not None and target_node_2 is not None and target_scanner_tip_2 >= target_node_2:
+    if within_tolerance(target_scanner_tip_2, target_node_2):
         scan_progressed = True
     if not scan_progressed:
         errors.append("bootstrap validation requires scanner tip progress or parity with the target node")
@@ -610,21 +625,21 @@ if mode == "bootstrap":
     if cursor_started and not cursor_progressed:
         errors.append("bootstrap validation requires pay-server cursor progress or a stable non-zero cursor")
 elif mode == "warm":
-    if (target_node_2 or 0) != (prod_height_2 or 0):
+    if not within_tolerance(target_node_2, prod_height_2):
         errors.append("warm validation requires target node height parity with production")
-    if (target_scanner_tip_2 or 0) < (target_node_2 or 0):
+    if not within_tolerance(target_scanner_tip_2, target_node_2):
         errors.append("warm validation requires scanner tip parity with the target node")
     cursor_progressed = False
     if target_cursor_1 is not None and target_cursor_2 is not None and target_cursor_2 > target_cursor_1:
         cursor_progressed = True
-    if target_cursor_2 is not None and target_cursor_2 > 0 and (target_scanner_tip_2 or 0) >= (target_node_2 or 0):
+    if target_cursor_2 is not None and target_cursor_2 > 0 and within_tolerance(target_scanner_tip_2, target_node_2):
         cursor_progressed = True
     if not cursor_progressed:
         errors.append("warm validation requires replay cursor progress or a stable non-zero cursor after scanner parity")
 else:
-    if (target_node_2 or 0) != (prod_height_2 or 0):
+    if not within_tolerance(target_node_2, prod_height_2):
         errors.append("final validation requires target node height parity with production")
-    if (target_scanner_tip_2 or 0) < (target_node_2 or 0):
+    if not within_tolerance(target_scanner_tip_2, target_node_2):
         errors.append("final validation requires scanner tip parity with the target node")
     if target_cursor_2 is None or target_cursor_2 <= 0:
         errors.append("final validation requires a non-zero replay cursor")

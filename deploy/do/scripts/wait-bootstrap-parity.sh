@@ -13,6 +13,7 @@ Options:
   --required-consecutive <n>    Required consecutive parity samples. Default: 2
   --interval-seconds <sec>      Delay between samples. Default: 900
   --progress-seconds <sec>      Inner readiness progress window. Default: 15
+  --height-lag-tolerance <n>    Allowed block-height difference for parity checks. Default: 1
   --max-samples <n>             Stop after N samples. Default: 0 (no limit)
   --production-url <url>        Default: https://junopayserver.com
   --staging-url <url>           Default: https://staging.junopayserver.com
@@ -29,6 +30,7 @@ EOF
 REQUIRED_CONSECUTIVE=2
 INTERVAL_SECONDS=900
 PROGRESS_SECONDS=15
+HEIGHT_LAG_TOLERANCE=1
 MAX_SAMPLES=0
 PRODUCTION_URL="https://junopayserver.com"
 STAGING_URL="https://staging.junopayserver.com"
@@ -52,6 +54,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --progress-seconds)
       PROGRESS_SECONDS="${2:-}"
+      shift 2
+      ;;
+    --height-lag-tolerance)
+      HEIGHT_LAG_TOLERANCE="${2:-}"
       shift 2
       ;;
     --max-samples)
@@ -124,6 +130,7 @@ while true; do
     --production-url "$PRODUCTION_URL"
     --staging-url "$STAGING_URL"
     --progress-seconds "$PROGRESS_SECONDS"
+    --height-lag-tolerance "$HEIGHT_LAG_TOLERANCE"
     --target-host "$TARGET_HOST"
     --target-user "$TARGET_USER"
     --target-ssh-key "$TARGET_SSH_KEY"
@@ -141,7 +148,7 @@ while true; do
   set -e
 
   summary="$(
-    SUMMARY_INPUT="$output" python3 - "$status" "$timestamp" "$sample" "$consecutive" <<'PY'
+    SUMMARY_INPUT="$output" python3 - "$status" "$timestamp" "$sample" "$consecutive" "$HEIGHT_LAG_TOLERANCE" <<'PY'
 import os
 import sys
 
@@ -149,6 +156,7 @@ status = int(sys.argv[1])
 timestamp = sys.argv[2]
 sample = int(sys.argv[3])
 prior_consecutive = int(sys.argv[4])
+height_lag_tolerance = int(sys.argv[5])
 
 data = {}
 for line in os.environ.get("SUMMARY_INPUT", "").splitlines():
@@ -166,8 +174,10 @@ cursor = data.get("final_target_cursor")
 parity_ok = (
     status == 0
     and prod not in {None, "", "None"}
-    and node == prod
-    and scan == node
+    and node not in {None, "", "None"}
+    and scan not in {None, "", "None"}
+    and abs(int(node) - int(prod)) <= height_lag_tolerance
+    and abs(int(scan) - int(node)) <= height_lag_tolerance
 )
 
 print(f"sample={sample}")

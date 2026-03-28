@@ -247,14 +247,15 @@ To wait for actual bootstrap exit criteria instead of sampling manually:
 deploy/do/scripts/wait-bootstrap-parity.sh \
   --required-consecutive 2 \
   --interval-seconds 900 \
+  --height-lag-tolerance 1 \
   --service-token-file tmp/cloudflare-access-service-token.json \
   --target-ssh-key <path-to-existing-do-ssh-key>
 ```
 
 That gate only exits successfully after 2 consecutive samples where:
 
-- DO `junocashd` height equals production height
-- DO `juno-scan` `scanned_height` equals DO `junocashd` height
+- DO `junocashd` height is within 1 block of production
+- DO `juno-scan` `scanned_height` is within 1 block of DO `junocashd`
 - bootstrap readiness remains green
 
 Do not start another pay-server warm snapshot while the current staging replay is still catching up. Wait until the current rebuild converges cleanly, then resume the 24-hour warm-sync cadence.

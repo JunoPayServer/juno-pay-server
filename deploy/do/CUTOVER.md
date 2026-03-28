@@ -89,6 +89,7 @@ To block automatically until the DO node and scanner have reached production par
 deploy/do/scripts/wait-bootstrap-parity.sh \
   --required-consecutive 2 \
   --interval-seconds 900 \
+  --height-lag-tolerance 1 \
   --service-token-file tmp/cloudflare-access-service-token.json \
   --target-ssh-key <path-to-existing-do-ssh-key>
 ```
