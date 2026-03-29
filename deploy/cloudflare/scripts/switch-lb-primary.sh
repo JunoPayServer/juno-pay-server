@@ -129,8 +129,9 @@ payload = {
     "name": result["name"],
     "default_pools": json.loads(os.environ["LB_DEFAULT_POOLS"]),
     "proxied": result["proxied"],
-    "ttl": result["ttl"],
 }
+if "ttl" in result and result["ttl"] is not None:
+    payload["ttl"] = result["ttl"]
 for key in (
     "country_pools",
     "region_pools",
