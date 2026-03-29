@@ -270,7 +270,6 @@ Required repository secrets:
 - `JUNO_PAY_ADMIN_PASSWORD`
 - `JUNO_PAY_TOKEN_KEY_HEX`
 - Optional: `DEMO_MERCHANT_API_KEY`
-- Optional: `DEMO_MERCHANT_API_KEY_STAGING`
 - Optional: `CADDY_ORIGIN_CERT_PEM_B64`
 - Optional: `CADDY_ORIGIN_KEY_PEM_B64`
 
@@ -280,7 +279,7 @@ The workflow:
 - copies the DO deploy scripts to the host
 - bootstraps the host (optional per run)
 - deploys the stack over SSH
-- prefers `DEMO_MERCHANT_API_KEY_STAGING` when `verify_host` matches `staging_domain`
+- uses a single `DEMO_MERCHANT_API_KEY` for the shared DO host; staging and production do not have separate demo-app runtime keys on this topology
 - uses Cloudflare Origin CA certs for Caddy when `CADDY_ORIGIN_CERT_PEM_B64` and `CADDY_ORIGIN_KEY_PEM_B64` are present
 - defaults to staging-only certificate issuance with `caddy_server_names=staging.junopayserver.com`
 - checks `/v1/health` and `/v1/status` over HTTPS against the DO reserved IP using the configured `verify_host`
