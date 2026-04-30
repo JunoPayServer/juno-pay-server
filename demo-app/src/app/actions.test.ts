@@ -5,6 +5,8 @@ afterEach(() => {
   vi.unstubAllGlobals();
   delete process.env.JUNO_PAY_BASE_URL;
   delete process.env.JUNO_PAY_MERCHANT_API_KEY;
+  delete process.env.JUNO_PAY_CF_ACCESS_CLIENT_ID;
+  delete process.env.JUNO_PAY_CF_ACCESS_CLIENT_SECRET;
 });
 
 describe("demo actions", () => {
@@ -41,32 +43,35 @@ describe("demo actions", () => {
   it("createAirInvoice returns ok response", async () => {
     process.env.JUNO_PAY_BASE_URL = "http://example.test";
     process.env.JUNO_PAY_MERCHANT_API_KEY = "k_test";
+    process.env.JUNO_PAY_CF_ACCESS_CLIENT_ID = "access-id";
+    process.env.JUNO_PAY_CF_ACCESS_CLIENT_SECRET = "access-secret";
 
+    const fetchMock = vi.fn(async () => {
+      const body = {
+        status: "ok",
+        data: {
+          invoice: {
+            invoice_id: "inv_1",
+            merchant_id: "m_1",
+            external_order_id: "o1",
+            status: "open",
+            address: "j1...",
+            amount_zat: 100_000_000,
+            required_confirmations: 100,
+            received_zat_pending: 0,
+            received_zat_confirmed: 0,
+            expires_at: null,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+          invoice_token: "inv_tok_1",
+        },
+      };
+      return new Response(JSON.stringify(body), { status: 201, headers: { "Content-Type": "application/json" } });
+    });
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => {
-        const body = {
-          status: "ok",
-          data: {
-            invoice: {
-              invoice_id: "inv_1",
-              merchant_id: "m_1",
-              external_order_id: "o1",
-              status: "open",
-              address: "j1...",
-              amount_zat: 100_000_000,
-              required_confirmations: 100,
-              received_zat_pending: 0,
-              received_zat_confirmed: 0,
-              expires_at: null,
-              created_at: "2026-01-01T00:00:00Z",
-              updated_at: "2026-01-01T00:00:00Z",
-            },
-            invoice_token: "inv_tok_1",
-          },
-        };
-        return new Response(JSON.stringify(body), { status: 201, headers: { "Content-Type": "application/json" } });
-      }),
+      fetchMock,
     );
 
     const res = await createAirInvoice({ external_order_id: "o1", demo_user_id: "u1", email: "a@b.com" });
@@ -75,6 +80,9 @@ describe("demo actions", () => {
       expect(res.data.invoice.invoice_id).toBe("inv_1");
       expect(res.data.invoice_token).toBe("inv_tok_1");
     }
+    const headers = fetchMock.mock.calls[0]?.[1]?.headers as Headers;
+    expect(headers.get("Authorization")).toBe("Bearer k_test");
+    expect(headers.get("CF-Access-Client-Id")).toBe("access-id");
+    expect(headers.get("CF-Access-Client-Secret")).toBe("access-secret");
   });
 });
-

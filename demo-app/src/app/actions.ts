@@ -89,6 +89,17 @@ function merchantAPIKey(): string | null {
   return v ? v : null;
 }
 
+function withAccessHeaders(headers?: HeadersInit): Headers {
+  const out = new Headers(headers);
+  const clientID = (process.env.JUNO_PAY_CF_ACCESS_CLIENT_ID ?? "").trim();
+  const clientSecret = (process.env.JUNO_PAY_CF_ACCESS_CLIENT_SECRET ?? "").trim();
+  if (clientID && clientSecret) {
+    out.set("CF-Access-Client-Id", clientID);
+    out.set("CF-Access-Client-Secret", clientSecret);
+  }
+  return out;
+}
+
 async function parseJSONSafe(res: Response): Promise<unknown | undefined> {
   const text = await res.text();
   if (text.trim() === "") return undefined;
@@ -103,7 +114,7 @@ async function fetchAPI<T>(path: string, init?: RequestInit): Promise<ActionResu
 
   let res: Response;
   try {
-    res = await fetch(`${base}${path}`, { ...init, cache: "no-store" });
+    res = await fetch(`${base}${path}`, { ...init, headers: withAccessHeaders(init?.headers), cache: "no-store" });
   } catch (e) {
     return { ok: false, code: "network_error", error: e instanceof Error ? e.message : "network error" };
   }
