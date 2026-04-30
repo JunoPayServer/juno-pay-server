@@ -90,6 +90,7 @@ const displayName = username || email;
           <div className="px-2 mb-1.5 text-[10px] font-semibold uppercase tracking-wider th-faint">Admin</div>
           <Link
             href="/admin/"
+            prefetch={false}
             className="flex items-center gap-2.5 px-2 py-2 rounded-lg text-sm th-text th-hover transition-colors"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
