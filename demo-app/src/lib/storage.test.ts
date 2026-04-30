@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { clearUser, loadOrders, loadUser, saveOrders, saveUser, type DemoOrder } from "@/lib/storage";
+import { DEMO_USER, clearUser, loadOrCreateDemoUser, loadOrders, loadUser, saveOrders, saveUser, type DemoOrder } from "@/lib/storage";
 
 describe("storage", () => {
   beforeEach(() => {
@@ -13,6 +13,11 @@ describe("storage", () => {
   it("round-trips user", () => {
     saveUser({ user_id: "u1", email: "a@b.com" });
     expect(loadUser()).toEqual({ user_id: "u1", email: "a@b.com" });
+  });
+
+  it("creates the default demo user when missing", () => {
+    expect(loadOrCreateDemoUser()).toEqual(DEMO_USER);
+    expect(loadUser()).toEqual(DEMO_USER);
   });
 
   it("clearUser removes user", () => {
@@ -54,4 +59,3 @@ describe("storage", () => {
     expect(loadOrders()).toEqual([]);
   });
 });
-

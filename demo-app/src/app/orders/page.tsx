@@ -5,7 +5,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { getPublicInvoice } from '@/app/actions'
 import { InvoiceCheckoutCard } from '@/app/_components/InvoiceCheckoutCard'
 import { Sidebar } from '@/app/_components/Sidebar'
-import { clearUser, loadOrders, loadUser, saveOrders, type DemoOrder } from '@/lib/storage'
+import { clearUser, loadOrders, loadOrCreateDemoUser, loadUser, saveOrders, type DemoOrder } from '@/lib/storage'
 import { formatJUNO } from '@/lib/format'
 
 function StatusBadge({ status }: { status: string }) {
@@ -48,7 +48,7 @@ export default function OrdersPage() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    setUser(loadUser())
+    setUser(loadOrCreateDemoUser())
     setOrders(loadOrders())
   }, [])
 
@@ -114,19 +114,10 @@ export default function OrdersPage() {
     }
   }, [])
 
-  /* Not registered */
   if (!user) {
     return (
       <div className="min-h-screen th-page flex items-center justify-center px-4">
-        <div className="text-center">
-          <div className="text-sm th-dim mb-3">You need to sign in first.</div>
-          <Link
-            href="/"
-            className="text-sm text-[#dc8548] hover:text-[#e89a68] transition-colors"
-          >
-            ← Go to sign in
-          </Link>
-        </div>
+        <div className="text-sm th-dim">Loading demo...</div>
       </div>
     )
   }

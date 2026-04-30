@@ -21,7 +21,11 @@ export type DemoOrder = {
 
 const USER_KEY = "juno_demo_user_v1";
 const ORDERS_KEY = "juno_demo_orders_v1";
-export const REMEMBER_CREDS_KEY = "juno_remember_v1";
+export const DEMO_USER: DemoUser = {
+  user_id: "demo-user",
+  email: "demo@junopayserver.com",
+  username: "Demo",
+};
 
 export function loadUser(): DemoUser | null {
   if (typeof window === "undefined") return null;
@@ -37,6 +41,13 @@ export function loadUser(): DemoUser | null {
 export function saveUser(u: DemoUser) {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(USER_KEY, JSON.stringify(u));
+}
+
+export function loadOrCreateDemoUser(): DemoUser {
+  const existing = loadUser();
+  if (existing) return existing;
+  saveUser(DEMO_USER);
+  return DEMO_USER;
 }
 
 export function clearUser() {
@@ -60,4 +71,3 @@ export function saveOrders(orders: DemoOrder[]) {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(ORDERS_KEY, JSON.stringify(orders));
 }
-

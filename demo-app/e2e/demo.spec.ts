@@ -1,12 +1,7 @@
 import { test, expect } from "@playwright/test";
 
-test("registers, buys air, and auto-tracks checkout status", async ({ page, request }) => {
+test("buys air and auto-tracks checkout status", async ({ page, request }) => {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Sign in to Demo" })).toBeVisible();
-
-  await page.locator("#username").fill("demo");
-  await page.locator("#email").fill("demo@example.com");
-  await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
 
   await page.getByRole("button", { name: "Buy" }).click();

@@ -3,7 +3,6 @@
 const http = require("node:http");
 const { spawn } = require("node:child_process");
 const crypto = require("node:crypto");
-const path = require("node:path");
 
 const backendPort = Number.parseInt(process.env.E2E_BACKEND_PORT ?? "39180", 10);
 const frontendPort = Number.parseInt(process.env.E2E_FRONTEND_PORT ?? "39181", 10);
@@ -243,8 +242,8 @@ backend.listen(backendPort, "127.0.0.1", () => {
   console.log(`[e2e] mock backend on http://127.0.0.1:${backendPort}`);
 });
 
-const nextBin = path.resolve(__dirname, "../node_modules/.bin/next");
-const nextProc = spawn(nextBin, ["start", "-p", String(frontendPort)], {
+const nextBin = require.resolve("next/dist/bin/next");
+const nextProc = spawn(process.execPath, [nextBin, "start", "-p", String(frontendPort)], {
   stdio: "inherit",
   env: {
     ...process.env,
