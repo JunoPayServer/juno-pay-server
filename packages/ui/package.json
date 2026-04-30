@@ -1,7 +1,7 @@
 {
   "name": "@junopayserver/widgets",
-  "version": "0.1.0",
-  "description": "Shared Juno Pay Server React widgets and theme utilities.",
+  "version": "0.2.0",
+  "description": "Shared Juno Pay Server React widgets, QR checkout, and theme utilities.",
   "private": false,
   "type": "module",
   "repository": {
@@ -27,6 +27,9 @@
     "build": "tsc -p tsconfig.build.json",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run clean && npm run build"
+  },
+  "dependencies": {
+    "qrcode.react": "^4.2.0"
   },
   "peerDependencies": {
     "react": "^19.0.0",

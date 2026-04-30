@@ -10,6 +10,7 @@ deposit detection is done via `juno-scan` note scanning (trial-decrypt with UFVK
 - [`junocashd`](https://github.com/juno-cash/junocash/releases): full node (consensus + validated block source).
 - [`juno-scan`](https://github.com/JunoPayServer/juno-scan): watch-only scanner/indexer (UFVK → deposit events).
 - `juno-pay-server` (this repo): merchant config + invoices + durable event delivery (webhook/brokers).
+- [`@junopayserver/widgets`](https://github.com/JunoPayServer/junopay-widgets): React SDK/widgets for QR-code checkout and reusable JunoPay UI.
 - Admin dashboard: served by `juno-pay-server` at `GET /admin/` (static export).
 - Demo checkout UI: `demo-app/` (localStorage-only; can be hosted separately).
 
@@ -118,6 +119,24 @@ See `api/openapi.yaml` for exact schemas.
 `demo-app/` is a standalone demo checkout UI:
 - localStorage-only (no DB)
 - uses `POST /v1/invoices` (merchant API key) + public invoice endpoints
+- uses `@junopayserver/widgets` for the plug-and-play checkout card and QR-code payment flow
+
+## React checkout SDK
+
+Use [`@junopayserver/widgets`](https://github.com/JunoPayServer/junopay-widgets) to embed JunoPay checkout UI in a React app:
+
+```bash
+npm install github:JunoPayServer/junopay-widgets#v0.2.0
+```
+
+```tsx
+import { JunoPayCheckout } from "@junopayserver/widgets";
+import "@junopayserver/widgets/theme.css";
+
+export function Checkout({ invoice }) {
+  return <JunoPayCheckout invoice={invoice} logoSrc="/juno-pay-server-logo.svg" />;
+}
+```
 
 ## AWS deployment (reference)
 
