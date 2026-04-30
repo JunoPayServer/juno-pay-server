@@ -1,4 +1,4 @@
-import type { JunoPayInvoice, JunoPayInvoicePhase } from "./types.js";
+import type { JunoPayInvoice, JunoPayInvoiceEvent, JunoPayInvoicePhase } from "./types.js";
 
 export function receivedTotalZat(inv: JunoPayInvoice): number {
   return (inv.received_zat_pending ?? 0) + (inv.received_zat_confirmed ?? 0);
@@ -26,4 +26,22 @@ export function invoicePhase(inv: JunoPayInvoice, nowMs: number): JunoPayInvoice
   if (isPaymentComplete(inv)) return "payment_complete";
   if (isFullyPaid(inv)) return "pending_confirmations";
   return "awaiting_payment";
+}
+
+export function depositHeightForConfirmations(events: JunoPayInvoiceEvent[]): number | null {
+  let h: number | null = null;
+  for (const e of events) {
+    const dh = e.deposit?.height;
+    if (typeof dh !== "number") continue;
+    if (!Number.isFinite(dh)) continue;
+    if (h === null || dh > h) h = dh;
+  }
+  return h;
+}
+
+export function confirmationsCount(bestHeight: number | null, depositHeight: number | null): number | null {
+  if (bestHeight === null || depositHeight === null) return null;
+  if (!Number.isFinite(bestHeight) || !Number.isFinite(depositHeight)) return null;
+  const confs = Math.floor(bestHeight) - Math.floor(depositHeight) + 1;
+  return confs < 0 ? 0 : confs;
 }

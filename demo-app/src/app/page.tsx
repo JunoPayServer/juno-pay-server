@@ -2,17 +2,52 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { createAirInvoice } from "@/app/actions";
-import { InvoiceCheckoutCard } from "@/app/_components/InvoiceCheckoutCard";
+import {
+  JunoPayCheckoutFlow,
+  JunoPayCreateInvoiceButton,
+  type JunoPayCheckoutFlowState,
+  type JunoPayClient,
+  type JunoPayInvoice,
+} from "@junopayserver/widgets";
+import { createAirInvoice, getPublicInvoice, getPublicStatus, listPublicInvoiceEvents } from "@/app/actions";
 import { Sidebar } from "@/app/_components/Sidebar";
 import { clearUser, loadOrders, loadOrCreateDemoUser, saveOrders, type DemoOrder, type DemoUser } from "@/lib/storage";
 import { uuidv4 } from "@/lib/uuid";
 import { formatJUNO } from "@/lib/format";
 
+const junoPayClient: Pick<JunoPayClient, "getPublicInvoice" | "getStatus" | "listPublicInvoiceEvents"> = {
+  getPublicInvoice,
+  getStatus: getPublicStatus,
+  listPublicInvoiceEvents,
+};
+
+function orderIDFromExternalOrderID(externalOrderID: string | undefined, fallback: string): string {
+  const value = externalOrderID?.trim();
+  if (!value) return fallback;
+  const parts = value.split(":");
+  return parts[parts.length - 1] || fallback;
+}
+
+function orderToInvoice(order: DemoOrder): JunoPayInvoice {
+  return {
+    invoice_id: order.invoice_id,
+    merchant_id: "unknown",
+    external_order_id: order.external_order_id,
+    status: order.status,
+    address: order.address,
+    amount_zat: order.amount_zat,
+    required_confirmations: 100,
+    received_zat_pending: order.received_zat_pending,
+    received_zat_confirmed: order.received_zat_confirmed,
+    expires_at: null,
+    created_at: order.created_at,
+    updated_at: order.updated_at,
+  };
+}
+
 export default function HomePage() {
   const [user, setUser] = useState<DemoUser | null>(null);
   const [orders, setOrders] = useState<DemoOrder[]>([]);
-  const [buying, setBuying] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -21,11 +56,44 @@ export default function HomePage() {
   }, []);
 
   const lastOrder = useMemo(() => orders[0] ?? null, [orders]);
+  const initialCheckout = useMemo<JunoPayCheckoutFlowState | null>(() => {
+    if (!lastOrder) return null;
+    return {
+      invoice: orderToInvoice(lastOrder),
+      invoice_token: lastOrder.invoice_token,
+      next_cursor: lastOrder.events_cursor,
+    };
+  }, [lastOrder]);
 
   function handleReset() {
     clearUser();
     setOrders([]);
     setUser(loadOrCreateDemoUser());
+  }
+
+  function upsertCheckoutState(state: JunoPayCheckoutFlowState) {
+    const invoice = state.invoice;
+    const orderID = orderIDFromExternalOrderID(invoice.external_order_id, invoice.invoice_id);
+    const nextOrder: DemoOrder = {
+      order_id: orderID,
+      external_order_id: invoice.external_order_id ?? orderID,
+      invoice_id: invoice.invoice_id,
+      invoice_token: state.invoice_token,
+      address: invoice.address,
+      amount_zat: invoice.amount_zat,
+      status: invoice.status,
+      received_zat_pending: invoice.received_zat_pending,
+      received_zat_confirmed: invoice.received_zat_confirmed,
+      created_at: invoice.created_at ?? new Date().toISOString(),
+      updated_at: invoice.updated_at ?? new Date().toISOString(),
+      events_cursor: state.next_cursor,
+    };
+
+    setOrders((prev) => {
+      const next = [nextOrder, ...prev.filter((o) => o.order_id !== nextOrder.order_id)];
+      saveOrders(next);
+      return next;
+    });
   }
 
   if (!user) {
@@ -70,49 +138,25 @@ export default function HomePage() {
                 <div className="text-sm font-medium th-text">1 gallon of air</div>
                 <div className="text-xs th-dim mt-0.5">Price: 1 JUNO</div>
               </div>
-              <button
-                type="button"
-                disabled={buying}
-                onClick={async () => {
+              <JunoPayCreateInvoiceButton
+                createInvoice={async () => {
                   setError(null);
-                  setBuying(true);
-                  try {
-                    const orderID = uuidv4();
-                    const externalOrderID = `demo-air:${user.user_id}:${orderID}`;
-                    const out = await createAirInvoice({ external_order_id: externalOrderID, demo_user_id: user.user_id, email: user.email });
-                    if (!out.ok) { setError(out.error); return; }
-                    const o: DemoOrder = {
-                      order_id: orderID,
-                      external_order_id: externalOrderID,
-                      invoice_id: out.data.invoice.invoice_id,
-                      invoice_token: out.data.invoice_token,
-                      address: out.data.invoice.address,
-                      amount_zat: out.data.invoice.amount_zat,
-                      status: out.data.invoice.status,
-                      received_zat_pending: out.data.invoice.received_zat_pending,
-                      received_zat_confirmed: out.data.invoice.received_zat_confirmed,
-                      created_at: out.data.invoice.created_at,
-                      updated_at: out.data.invoice.updated_at,
-                      events_cursor: "0",
-                    };
-                    const next = [o, ...orders];
-                    saveOrders(next);
-                    setOrders(next);
-                  } catch (e) {
-                    setError(e instanceof Error ? e.message : "create invoice failed");
-                  } finally {
-                    setBuying(false);
-                  }
+                  const orderID = uuidv4();
+                  const externalOrderID = `demo-air:${user.user_id}:${orderID}`;
+                  const out = await createAirInvoice({ external_order_id: externalOrderID, demo_user_id: user.user_id, email: user.email });
+                  if (!out.ok) throw new Error(out.error);
+                  return out.data;
                 }}
-                className="btn-gold text-black font-semibold px-5 py-2 rounded-lg text-sm"
-              >
-                {buying ? "Creating…" : "Buy"}
-              </button>
+                buttonLabel="Buy"
+                creatingLabel="Creating..."
+                onInvoiceCreated={(invoice) => upsertCheckoutState({ invoice: invoice.invoice, invoice_token: invoice.invoice_token, next_cursor: "0" })}
+                onError={setError}
+              />
             </div>
           </div>
 
           {/* Latest invoice */}
-          {lastOrder ? (
+          {lastOrder && initialCheckout ? (
             <div className="space-y-3">
               <div className="flex items-center justify-between mb-2">
                 <h2 className="text-sm font-semibold th-muted uppercase tracking-wider">Latest Invoice</h2>
@@ -120,15 +164,21 @@ export default function HomePage() {
                   View all ({orders.length}) →
                 </Link>
               </div>
-              <InvoiceCheckoutCard
-                order={lastOrder}
-                onOrderUpdate={(next) => {
-                  setOrders((prev) => {
-                    const updated = prev.map((o) => (o.order_id === next.order_id ? next : o));
-                    saveOrders(updated);
-                    return updated;
-                  });
+              <JunoPayCheckoutFlow
+                key={lastOrder.order_id}
+                client={junoPayClient}
+                initialInvoice={initialCheckout}
+                createInvoice={async () => {
+                  setError(null);
+                  const orderID = uuidv4();
+                  const externalOrderID = `demo-air:${user.user_id}:${orderID}`;
+                  const out = await createAirInvoice({ external_order_id: externalOrderID, demo_user_id: user.user_id, email: user.email });
+                  if (!out.ok) throw new Error(out.error);
+                  return out.data;
                 }}
+                onInvoiceCreated={(invoice) => upsertCheckoutState({ invoice: invoice.invoice, invoice_token: invoice.invoice_token, next_cursor: "0" })}
+                onInvoiceUpdated={upsertCheckoutState}
+                logoSrc="/juno-pay-server-logo.svg"
               />
             </div>
           ) : (

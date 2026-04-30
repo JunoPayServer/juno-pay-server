@@ -1,7 +1,7 @@
 {
   "name": "@junopayserver/widgets",
-  "version": "0.2.0",
-  "description": "Shared Juno Pay Server React widgets, QR checkout, and theme utilities.",
+  "version": "0.3.0",
+  "description": "End-to-end Juno Pay Server checkout SDK and React widgets.",
   "private": false,
   "type": "module",
   "repository": {
