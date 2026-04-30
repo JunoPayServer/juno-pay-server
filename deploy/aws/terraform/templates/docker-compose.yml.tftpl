@@ -1,0 +1,122 @@
+services:
+  junocashd:
+    image: ${image_junocashd}
+    restart: unless-stopped
+    environment:
+      JUNO_CHAIN: ${juno_chain}
+      JUNO_DATADIR: /data
+      JUNO_RPC_USER: rpcuser
+      JUNO_RPC_PASS: rpcpass
+      JUNO_RPC_PORT: 8232
+    command:
+      - -server=1
+      - -txindex=1
+      - -daemon=0
+      - -printtoconsole=1
+      - -datadir=/data
+      - -rpcbind=0.0.0.0
+      - -rpcallowip=0.0.0.0/0
+      - -rpcport=8232
+      - -rpcuser=rpcuser
+      - -rpcpassword=rpcpass
+    volumes:
+      - /opt/${name_prefix}/data/junocashd:/data
+    healthcheck:
+      test: ["CMD", "juno-cli", "getblockcount"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+  juno-scan:
+    image: ${image_juno_scan}
+    restart: unless-stopped
+    depends_on:
+      junocashd:
+        condition: service_healthy
+    environment:
+      JUNO_SCAN_LISTEN: 0.0.0.0:8080
+      JUNO_SCAN_RPC_URL: http://junocashd:8232
+      JUNO_SCAN_RPC_USER: rpcuser
+      JUNO_SCAN_RPC_PASS: rpcpass
+      JUNO_SCAN_UA_HRP: ${juno_scan_ua_hrp}
+      JUNO_SCAN_CONFIRMATIONS: ${juno_scan_confirms}
+%{ if enable_rds_postgres ~}
+      JUNO_SCAN_DB_DRIVER: postgres
+      JUNO_SCAN_DB_DSN: postgres://${rds_username}:__RDS_PASSWORD__@${rds_endpoint}:${rds_port}/${rds_db_name}?sslmode=require
+%{ else ~}
+      JUNO_SCAN_DB_DRIVER: rocksdb
+      JUNO_SCAN_DB_PATH: /data/db
+%{ endif ~}
+    volumes:
+      - /opt/${name_prefix}/data/juno-scan:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/v1/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 60
+
+  juno-pay-server:
+    image: ${image_juno_pay}
+    restart: unless-stopped
+    depends_on:
+      junocashd:
+        condition: service_healthy
+      juno-scan:
+        condition: service_healthy
+    environment:
+      JUNO_PAY_ADDR: 0.0.0.0:8080
+      JUNO_PAY_ADMIN_PASSWORD: __ADMIN_PASSWORD__
+      JUNO_PAY_TOKEN_KEY_HEX: __TOKEN_KEY_HEX__
+      JUNO_PAY_DATA_DIR: /data
+      JUNO_PAY_STORE_DRIVER: ${pay_store_driver}
+%{ if pay_store_driver != "sqlite" ~}
+      JUNO_PAY_STORE_DSN: __PAY_STORE_DSN__
+%{ endif ~}
+%{ if pay_store_driver == "mongo" ~}
+      JUNO_PAY_STORE_DB: ${pay_store_db}
+%{ endif ~}
+%{ if pay_store_prefix != "" ~}
+      JUNO_PAY_STORE_PREFIX: ${pay_store_prefix}
+%{ endif ~}
+      JUNO_SCAN_URL: http://juno-scan:8080
+      JUNO_CASHD_RPC_URL: http://junocashd:8232
+      JUNO_CASHD_RPC_USER: rpcuser
+      JUNO_CASHD_RPC_PASS: rpcpass
+    ports:
+      - "${pay_server_port}:8080"
+    volumes:
+      - /opt/${name_prefix}/data/juno-pay-server:/data
+
+%{ if enable_demo_app ~}
+  demo-app:
+    image: ${image_demo_app}
+    restart: unless-stopped
+    depends_on:
+      juno-pay-server:
+        condition: service_started
+    environment:
+      JUNO_PAY_BASE_URL: http://juno-pay-server:8080
+%{ if demo_api_key_enabled ~}
+      JUNO_PAY_MERCHANT_API_KEY: __DEMO_MERCHANT_API_KEY__
+%{ endif ~}
+%{ if !enable_caddy ~}
+    ports:
+      - "${demo_port}:3000"
+%{ endif ~}
+%{ endif ~}
+
+%{ if enable_caddy ~}
+  caddy:
+    image: caddy:2.7.6
+    restart: unless-stopped
+    depends_on:
+      juno-pay-server:
+        condition: service_started
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /opt/${name_prefix}/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /opt/${name_prefix}/data/caddy/data:/data
+      - /opt/${name_prefix}/data/caddy/config:/config
+%{ endif ~}

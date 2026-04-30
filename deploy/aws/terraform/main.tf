@@ -1,0 +1,383 @@
+data "aws_ami" "al2023" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-x86_64"]
+  }
+}
+
+resource "aws_security_group" "host" {
+  name        = "${var.name_prefix}-host"
+  description = "juno-pay-server host SG"
+  vpc_id      = local.effective_vpc_id
+
+  ingress {
+    description = "Pay server HTTP"
+    from_port   = var.pay_server_port
+    to_port     = var.pay_server_port
+    protocol    = "tcp"
+    cidr_blocks = var.allowed_cidrs
+  }
+
+  dynamic "ingress" {
+    for_each = (var.enable_demo_app || local.enable_caddy) ? [1] : []
+    content {
+      description = "HTTP"
+      from_port   = var.demo_port
+      to_port     = var.demo_port
+      protocol    = "tcp"
+      cidr_blocks = var.demo_allowed_cidrs
+    }
+  }
+
+  dynamic "ingress" {
+    for_each = local.enable_caddy ? [1] : []
+    content {
+      description = "HTTPS"
+      from_port   = 443
+      to_port     = 443
+      protocol    = "tcp"
+      cidr_blocks = var.demo_allowed_cidrs
+    }
+  }
+
+  dynamic "ingress" {
+    for_each = length(var.ssh_allowed_cidrs) > 0 ? [1] : []
+    content {
+      description = "SSH"
+      from_port   = 22
+      to_port     = 22
+      protocol    = "tcp"
+      cidr_blocks = var.ssh_allowed_cidrs
+    }
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${var.name_prefix}-host"
+  }
+}
+
+data "aws_iam_policy_document" "assume_ec2" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["ec2.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "host" {
+  name               = "${var.name_prefix}-host"
+  assume_role_policy = data.aws_iam_policy_document.assume_ec2.json
+}
+
+resource "aws_iam_role_policy_attachment" "ssm_core" {
+  role       = aws_iam_role.host.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_role_policy_attachment" "ecr_readonly" {
+  role       = aws_iam_role.host.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+}
+
+data "aws_iam_policy_document" "host_inline" {
+  statement {
+    sid     = "ReadSSMParameters"
+    actions = ["ssm:GetParameter", "ssm:GetParameters"]
+    resources = [
+      "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${var.admin_password_ssm_param}",
+      "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${var.token_key_ssm_param}",
+    ]
+  }
+
+  dynamic "statement" {
+    for_each = var.pay_store_dsn_ssm_param != "" ? [1] : []
+    content {
+      sid     = "ReadPayStoreDSN"
+      actions = ["ssm:GetParameter", "ssm:GetParameters"]
+      resources = [
+        "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${var.pay_store_dsn_ssm_param}",
+      ]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.demo_merchant_api_key_ssm_param != "" ? [1] : []
+    content {
+      sid     = "ReadDemoMerchantAPIKey"
+      actions = ["ssm:GetParameter", "ssm:GetParameters"]
+      resources = [
+        "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${var.demo_merchant_api_key_ssm_param}",
+      ]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.demo_merchant_api_key_ssm_param != "" ? [1] : []
+    content {
+      sid     = "WriteDemoMerchantAPIKey"
+      actions = ["ssm:PutParameter"]
+      resources = [
+        "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${var.demo_merchant_api_key_ssm_param}",
+      ]
+    }
+  }
+
+  statement {
+    sid       = "DecryptSSMDefaultKey"
+    actions   = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey"]
+    resources = ["*"]
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["ssm.${var.aws_region}.amazonaws.com"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.enable_rds_postgres ? [1] : []
+    content {
+      sid       = "ReadRDSSecret"
+      actions   = ["secretsmanager:GetSecretValue"]
+      resources = [aws_db_instance.junoscan[0].master_user_secret[0].secret_arn]
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "host_inline" {
+  name   = "${var.name_prefix}-host-inline"
+  role   = aws_iam_role.host.id
+  policy = data.aws_iam_policy_document.host_inline.json
+}
+
+resource "aws_iam_instance_profile" "host" {
+  name = "${var.name_prefix}-host"
+  role = aws_iam_role.host.name
+}
+
+locals {
+  enable_caddy = trimspace(var.domain_name) != "" && trimspace(var.route53_zone_id) != ""
+
+  stable_tag       = "prod"
+  image_juno_pay   = "${split(":", var.image_juno_pay_server)[0]}:${local.stable_tag}"
+  image_junocashd  = "${split(":", var.image_junocashd)[0]}:${local.stable_tag}"
+  image_juno_scan  = "${split(":", var.image_juno_scan)[0]}:${local.stable_tag}"
+  image_demo_app   = var.enable_demo_app ? "${split(":", var.image_demo_app)[0]}:${local.stable_tag}" : ""
+
+  compose_yml = templatefile("${path.module}/templates/docker-compose.yml.tftpl", {
+    name_prefix          = var.name_prefix
+    image_junocashd      = local.image_junocashd
+    image_juno_scan      = local.image_juno_scan
+    image_juno_pay       = local.image_juno_pay
+    enable_demo_app      = var.enable_demo_app
+    image_demo_app       = local.image_demo_app
+    demo_port            = var.demo_port
+    demo_api_key_enabled = var.demo_merchant_api_key_ssm_param != ""
+    enable_caddy         = local.enable_caddy
+    pay_server_port      = var.pay_server_port
+    juno_chain           = var.juno_chain
+    juno_scan_ua_hrp     = var.juno_scan_ua_hrp
+    juno_scan_confirms   = var.juno_scan_confirmations
+    pay_store_driver     = var.pay_store_driver
+    pay_store_db         = var.pay_store_db
+    pay_store_prefix     = var.pay_store_prefix
+    enable_rds_postgres  = var.enable_rds_postgres
+    rds_endpoint         = var.enable_rds_postgres ? aws_db_instance.junoscan[0].address : ""
+    rds_port             = var.enable_rds_postgres ? aws_db_instance.junoscan[0].port : 0
+    rds_db_name          = var.enable_rds_postgres ? aws_db_instance.junoscan[0].db_name : ""
+    rds_username         = var.enable_rds_postgres ? aws_db_instance.junoscan[0].username : ""
+    rds_secret_arn       = var.enable_rds_postgres ? aws_db_instance.junoscan[0].master_user_secret[0].secret_arn : ""
+  })
+}
+
+resource "aws_ebs_volume" "data" {
+  count             = var.data_volume_gb > 0 ? 1 : 0
+  availability_zone = local.effective_az
+  size              = var.data_volume_gb
+  type              = "gp3"
+  encrypted         = true
+
+  tags = {
+    Name = "${var.name_prefix}-data"
+  }
+}
+
+resource "aws_instance" "host" {
+  ami                         = data.aws_ami.al2023.id
+  instance_type               = var.instance_type
+  subnet_id                   = local.effective_subnet_id
+  vpc_security_group_ids      = [aws_security_group.host.id]
+  iam_instance_profile        = aws_iam_instance_profile.host.name
+  key_name                    = var.ssh_key_name
+  associate_public_ip_address = true
+
+  root_block_device {
+    volume_size = var.root_volume_gb
+    volume_type = "gp3"
+  }
+
+  user_data_base64 = base64gzip(templatefile("${path.module}/templates/user-data.sh.tftpl", {
+    name_prefix                     = var.name_prefix
+    aws_region                      = var.aws_region
+    pay_server_port                 = var.pay_server_port
+    admin_password_ssm_param        = var.admin_password_ssm_param
+    token_key_ssm_param             = var.token_key_ssm_param
+    pay_store_dsn_ssm_param         = var.pay_store_dsn_ssm_param
+    demo_merchant_api_key_ssm_param = var.demo_merchant_api_key_ssm_param
+    domain_name                     = var.domain_name
+    enable_caddy                    = local.enable_caddy
+    enable_demo_app                 = var.enable_demo_app
+    data_volume_id                  = try(aws_ebs_volume.data[0].id, "")
+    rds_secret_arn                  = var.enable_rds_postgres ? aws_db_instance.junoscan[0].master_user_secret[0].secret_arn : ""
+    docker_compose_yml              = local.compose_yml
+  }))
+  user_data_replace_on_change = true
+
+  lifecycle {
+    ignore_changes = [user_data_base64]
+  }
+
+  tags = {
+    Name = "${var.name_prefix}-host"
+  }
+}
+
+resource "aws_volume_attachment" "data" {
+  count       = var.data_volume_gb > 0 ? 1 : 0
+  device_name = "/dev/sdf"
+  volume_id   = aws_ebs_volume.data[0].id
+  instance_id = aws_instance.host.id
+}
+
+resource "aws_eip" "host" {
+  domain = "vpc"
+
+  tags = {
+    Name = "${var.name_prefix}-eip"
+  }
+}
+
+resource "aws_eip_association" "host" {
+  allocation_id = aws_eip.host.id
+  instance_id   = aws_instance.host.id
+}
+
+resource "aws_security_group" "rds" {
+  count       = var.enable_rds_postgres ? 1 : 0
+  name        = "${var.name_prefix}-rds"
+  description = "RDS access for juno-scan"
+  vpc_id      = local.effective_vpc_id
+
+  ingress {
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.host.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_db_subnet_group" "junoscan" {
+  count      = var.enable_rds_postgres ? 1 : 0
+  name       = "${var.name_prefix}-junoscan"
+  subnet_ids = var.rds_subnet_ids
+}
+
+resource "aws_db_instance" "junoscan" {
+  count                   = var.enable_rds_postgres ? 1 : 0
+  identifier              = "${var.name_prefix}-junoscan"
+  engine                  = "postgres"
+  engine_version          = "16"
+  instance_class          = var.rds_instance_class
+  allocated_storage       = 100
+  storage_type            = "gp3"
+  storage_encrypted       = true
+  publicly_accessible     = false
+  backup_retention_period = 7
+
+  db_name                     = "junoscan"
+  username                    = "junoscan"
+  manage_master_user_password = true
+
+  db_subnet_group_name   = aws_db_subnet_group.junoscan[0].name
+  vpc_security_group_ids = [aws_security_group.rds[0].id]
+
+  skip_final_snapshot = true
+}
+
+resource "aws_security_group" "msk" {
+  count       = var.enable_msk ? 1 : 0
+  name        = "${var.name_prefix}-msk"
+  description = "MSK access for juno-pay-server"
+  vpc_id      = local.effective_vpc_id
+
+  ingress {
+    description     = "Kafka plaintext"
+    from_port       = 9092
+    to_port         = 9092
+    protocol        = "tcp"
+    security_groups = [aws_security_group.host.id]
+  }
+
+  ingress {
+    description     = "Kafka TLS"
+    from_port       = 9094
+    to_port         = 9094
+    protocol        = "tcp"
+    security_groups = [aws_security_group.host.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_msk_cluster" "events" {
+  count                  = var.enable_msk ? 1 : 0
+  cluster_name           = "${var.name_prefix}-events"
+  kafka_version          = var.msk_kafka_version
+  number_of_broker_nodes = length(var.msk_subnet_ids)
+
+  broker_node_group_info {
+    instance_type   = var.msk_instance_type
+    client_subnets  = var.msk_subnet_ids
+    security_groups = [aws_security_group.msk[0].id]
+
+    storage_info {
+      ebs_storage_info {
+        volume_size = var.msk_ebs_volume_gb
+      }
+    }
+  }
+
+  encryption_info {
+    encryption_in_transit {
+      client_broker = "TLS_PLAINTEXT"
+      in_cluster    = true
+    }
+  }
+
+  client_authentication {
+    unauthenticated = true
+  }
+}

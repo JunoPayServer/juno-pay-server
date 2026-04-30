@@ -1,0 +1,45 @@
+/* ── Theme utility classes (dark default, light overrides) ── */
+
+.th-page { background-color: #0e0e12; }
+.th-aside { background-color: #0e0e12; }
+.th-content { background-color: #1e1e27; }
+.th-modal { background-color: #1f1f29; }
+.th-page-alpha { background-color: rgba(30, 30, 39, 0.9); }
+.th-surface { background-color: #1e1e27; }
+.th-input { background-color: rgba(255, 255, 255, 0.06); }
+.th-border { border-color: rgba(255, 255, 255, 0.1); }
+.th-text { color: #f0f0f2; }
+.th-muted { color: #a0a0b4; }
+.th-dim { color: #6a6a7e; }
+.th-faint { color: #4e4e60; }
+.th-hover:hover { background-color: rgba(255, 255, 255, 0.06); }
+
+[data-theme='light'] .th-page { background-color: #f0f0f0; }
+[data-theme='light'] .th-aside { background-color: #ffffff; }
+[data-theme='light'] .th-content { background-color: #f0f0f0; }
+[data-theme='light'] .th-modal { background-color: #ffffff; }
+[data-theme='light'] .th-page-alpha { background-color: rgba(240, 240, 240, 0.85); }
+[data-theme='light'] .th-surface { background-color: #ffffff; }
+[data-theme='light'] .th-input { background-color: rgba(0, 0, 0, 0.04); }
+[data-theme='light'] .th-border { border-color: rgba(0, 0, 0, 0.1); }
+[data-theme='light'] .th-text { color: #111111; }
+[data-theme='light'] .th-muted { color: #666666; }
+[data-theme='light'] .th-dim { color: #888888; }
+[data-theme='light'] .th-faint { color: #aaaaaa; }
+[data-theme='light'] .th-hover:hover { background-color: rgba(0, 0, 0, 0.05); }
+
+/* ── Gold button ── */
+.btn-gold {
+  background: #dc8548;
+  transition: background 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+}
+.btn-gold:hover {
+  background: #e89a68;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(220, 133, 72, 0.3);
+}
+.btn-gold:disabled {
+  opacity: 0.5;
+  transform: none;
+  box-shadow: none;
+}

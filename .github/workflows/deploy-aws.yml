@@ -1,0 +1,195 @@
+name: deploy-aws
+
+on:
+  workflow_dispatch:
+    inputs:
+      aws_region:
+        description: AWS region
+        required: true
+        default: us-east-1
+      name_prefix:
+        description: Prefix for AWS/ECR resource names
+        required: true
+        default: juno-pay
+      juno_chain:
+        description: mainnet|testnet|regtest
+        required: true
+        default: mainnet
+      juno_scan_ua_hrp:
+        description: Unified address HRP passed to juno-scan
+        required: true
+        default: j
+      juno_scan_confirmations:
+        description: Confirmations required for confirmed deposit events
+        required: true
+        default: "100"
+      allowed_cidrs_json:
+        description: Allowed CIDRs for public HTTP ports (JSON array)
+        required: true
+        default: "[\"0.0.0.0/0\"]"
+      juno_scan_repo:
+        description: Git repo URL for juno-scan build
+        required: true
+        default: https://github.com/junocash-tools/juno-scan.git
+      juno_scan_ref:
+        description: Git ref for juno-scan build
+        required: true
+        default: 8e40d26577be1e946823ab3f380be5baf8a1dccd
+      tag:
+        description: "Docker tag (default: short sha)"
+        required: false
+      tf_action:
+        description: Terraform action
+        type: choice
+        required: true
+        default: apply
+        options:
+          - plan
+          - apply
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ inputs.aws_region }}
+      NAME_PREFIX: ${{ inputs.name_prefix }}
+      JUNO_CHAIN: ${{ inputs.juno_chain }}
+      JUNO_SCAN_UA_HRP: ${{ inputs.juno_scan_ua_hrp }}
+      JUNO_SCAN_CONFIRMATIONS: ${{ inputs.juno_scan_confirmations }}
+      JUNO_SCAN_REPO: ${{ inputs.juno_scan_repo }}
+      JUNO_SCAN_REF: ${{ inputs.juno_scan_ref }}
+
+      TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+      TF_STATE_LOCK_TABLE: ${{ vars.TF_STATE_LOCK_TABLE }}
+
+      TF_VAR_aws_region: ${{ inputs.aws_region }}
+      TF_VAR_name_prefix: ${{ inputs.name_prefix }}
+      TF_VAR_juno_chain: ${{ inputs.juno_chain }}
+      TF_VAR_juno_scan_ua_hrp: ${{ inputs.juno_scan_ua_hrp }}
+      TF_VAR_juno_scan_confirmations: ${{ inputs.juno_scan_confirmations }}
+      TF_VAR_allowed_cidrs: ${{ inputs.allowed_cidrs_json }}
+      TF_VAR_demo_allowed_cidrs: ${{ inputs.allowed_cidrs_json }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${TF_STATE_BUCKET:?set GitHub variable TF_STATE_BUCKET}"
+          : "${TF_STATE_LOCK_TABLE:?set GitHub variable TF_STATE_LOCK_TABLE}"
+          : "${AWS_DEPLOY_ROLE_ARN:?set GitHub secret AWS_DEPLOY_ROLE_ARN}"
+          : "${JUNO_PAY_ADMIN_PASSWORD:?set GitHub secret JUNO_PAY_ADMIN_PASSWORD}"
+          : "${JUNO_PAY_TOKEN_KEY_HEX:?set GitHub secret JUNO_PAY_TOKEN_KEY_HEX}"
+        env:
+          AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          JUNO_PAY_ADMIN_PASSWORD: ${{ secrets.JUNO_PAY_ADMIN_PASSWORD }}
+          JUNO_PAY_TOKEN_KEY_HEX: ${{ secrets.JUNO_PAY_TOKEN_KEY_HEX }}
+
+      - name: Bootstrap Terraform state (S3 + DynamoDB)
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x deploy/aws/scripts/bootstrap-tfstate.sh
+          deploy/aws/scripts/bootstrap-tfstate.sh \
+            --region "${AWS_REGION}" \
+            --bucket "${TF_STATE_BUCKET}" \
+            --table "${TF_STATE_LOCK_TABLE}"
+
+      - name: Build & push Docker images to ECR
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG_INPUT="${TAG_INPUT:-}"
+          if [[ -z "${TAG_INPUT}" ]]; then
+            TAG_INPUT="${GITHUB_SHA:0:7}"
+          fi
+
+          chmod +x deploy/aws/scripts/build-push-ecr.sh
+          deploy/aws/scripts/build-push-ecr.sh \
+            --region "${AWS_REGION}" \
+            --name-prefix "${NAME_PREFIX}" \
+            --tag "${TAG_INPUT}" \
+            --juno-scan-repo "${JUNO_SCAN_REPO}" \
+            --juno-scan-ref "${JUNO_SCAN_REF}"
+
+          ACCOUNT_ID="$(aws sts get-caller-identity --region "${AWS_REGION}" --query Account --output text)"
+          REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+          echo "TF_VAR_image_juno_pay_server=${REGISTRY}/${NAME_PREFIX}-juno-pay-server:${TAG_INPUT}" >> "${GITHUB_ENV}"
+          echo "TF_VAR_image_junocashd=${REGISTRY}/${NAME_PREFIX}-junocashd:${TAG_INPUT}" >> "${GITHUB_ENV}"
+          echo "TF_VAR_image_juno_scan=${REGISTRY}/${NAME_PREFIX}-juno-scan:${TAG_INPUT}" >> "${GITHUB_ENV}"
+          echo "TF_VAR_image_demo_app=${REGISTRY}/${NAME_PREFIX}-juno-demo-app:${TAG_INPUT}" >> "${GITHUB_ENV}"
+
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
+
+      - name: Put required SSM parameters
+        shell: bash
+        run: |
+          set -euo pipefail
+          ADMIN_PARAM="${ADMIN_PARAM:-/juno-pay/admin_password}"
+          TOKEN_PARAM="${TOKEN_PARAM:-/juno-pay/token_key_hex}"
+          DEMO_PARAM="${DEMO_PARAM:-/juno-pay/demo_merchant_api_key}"
+
+          aws ssm put-parameter --region "${AWS_REGION}" --name "${ADMIN_PARAM}" --type SecureString --overwrite --value "${JUNO_PAY_ADMIN_PASSWORD}" >/dev/null
+          aws ssm put-parameter --region "${AWS_REGION}" --name "${TOKEN_PARAM}" --type SecureString --overwrite --value "${JUNO_PAY_TOKEN_KEY_HEX}" >/dev/null
+
+          if [[ -n "${DEMO_MERCHANT_API_KEY:-}" && "${DEMO_MERCHANT_API_KEY}" != "-" ]]; then
+            aws ssm put-parameter --region "${AWS_REGION}" --name "${DEMO_PARAM}" --type SecureString --overwrite --value "${DEMO_MERCHANT_API_KEY}" >/dev/null
+            echo "TF_VAR_demo_merchant_api_key_ssm_param=${DEMO_PARAM}" >> "${GITHUB_ENV}"
+          fi
+          echo "OK"
+        env:
+          ADMIN_PARAM: ${{ vars.JUNO_PAY_ADMIN_PASSWORD_SSM_PARAM }}
+          TOKEN_PARAM: ${{ vars.JUNO_PAY_TOKEN_KEY_SSM_PARAM }}
+          DEMO_PARAM: ${{ vars.JUNO_PAY_DEMO_MERCHANT_API_KEY_SSM_PARAM }}
+          JUNO_PAY_ADMIN_PASSWORD: ${{ secrets.JUNO_PAY_ADMIN_PASSWORD }}
+          JUNO_PAY_TOKEN_KEY_HEX: ${{ secrets.JUNO_PAY_TOKEN_KEY_HEX }}
+          DEMO_MERCHANT_API_KEY: ${{ secrets.DEMO_MERCHANT_API_KEY }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.5
+
+      - name: Terraform init
+        shell: bash
+        working-directory: deploy/aws/terraform
+        run: |
+          set -euo pipefail
+          TF_STATE_KEY="${NAME_PREFIX}/${JUNO_CHAIN}/terraform.tfstate"
+          terraform init -input=false \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=${TF_STATE_KEY}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=${TF_STATE_LOCK_TABLE}" \
+            -backend-config="encrypt=true"
+
+      - name: Terraform plan
+        if: ${{ inputs.tf_action == 'plan' }}
+        shell: bash
+        working-directory: deploy/aws/terraform
+        run: terraform plan -input=false
+
+      - name: Terraform apply
+        if: ${{ inputs.tf_action == 'apply' }}
+        shell: bash
+        working-directory: deploy/aws/terraform
+        run: terraform apply -input=false -auto-approve

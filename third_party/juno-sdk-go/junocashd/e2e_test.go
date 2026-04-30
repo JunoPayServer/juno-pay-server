@@ -1,0 +1,60 @@
+//go:build e2e
+
+package junocashd_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"os/exec"
+	"testing"
+	"time"
+
+	"github.com/JunoPayServer/juno-sdk-go/internal/testutil"
+	"github.com/JunoPayServer/juno-sdk-go/junocashd"
+)
+
+func TestJunocashdAndCLI_E2E(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if os.Getenv("JUNO_TEST_RPC_URL") == "" {
+		if _, err := exec.LookPath("junocash-cli"); err != nil {
+			t.Skip("junocash-cli not found in PATH")
+		}
+	}
+
+	r, err := testutil.StartJunocashd(ctx, testutil.JunocashdConfig{})
+	if err != nil {
+		if errors.Is(err, testutil.ErrJunocashdNotFound) {
+			t.Skip("junocashd not found in PATH")
+		}
+		t.Fatalf("StartJunocashd: %v", err)
+	}
+	defer func() { _ = r.Stop(context.Background()) }()
+
+	cli := junocashd.New(r.RPCURL, r.RPCUser, r.RPCPassword)
+	info, err := cli.GetBlockchainInfo(ctx)
+	if err != nil {
+		t.Fatalf("GetBlockchainInfo: %v", err)
+	}
+	if info.Chain != "regtest" {
+		t.Fatalf("chain=%q want regtest", info.Chain)
+	}
+
+	out, err := r.CLICommand(ctx, "getblockchaininfo").CombinedOutput()
+	if err != nil {
+		t.Fatalf("junocash-cli getblockchaininfo: %v\n%s", err, string(out))
+	}
+
+	var cliInfo struct {
+		Chain string `json:"chain"`
+	}
+	if err := json.Unmarshal(out, &cliInfo); err != nil {
+		t.Fatalf("unmarshal junocash-cli output: %v\n%s", err, string(out))
+	}
+	if cliInfo.Chain != "regtest" {
+		t.Fatalf("cli chain=%q want regtest", cliInfo.Chain)
+	}
+}

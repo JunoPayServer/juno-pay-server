@@ -1,0 +1,325 @@
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/JunoPayServer/juno-pay-server/internal/api"
+	"github.com/JunoPayServer/juno-pay-server/internal/ingest"
+	"github.com/JunoPayServer/juno-pay-server/internal/keys"
+	"github.com/JunoPayServer/juno-pay-server/internal/keys/ffi"
+	"github.com/JunoPayServer/juno-pay-server/internal/outbox"
+	"github.com/JunoPayServer/juno-pay-server/internal/scanclient"
+	"github.com/JunoPayServer/juno-pay-server/internal/store"
+	mongostore "github.com/JunoPayServer/juno-pay-server/internal/store/mongo"
+	"github.com/JunoPayServer/juno-pay-server/internal/store/sqlstore"
+	"github.com/JunoPayServer/juno-sdk-go/junocashd"
+)
+
+func main() {
+	addr := getenv("JUNO_PAY_ADDR", "127.0.0.1:8080")
+	adminPassword := getenv("JUNO_PAY_ADMIN_PASSWORD", "")
+	if adminPassword == "" {
+		log.Fatalf("missing env: JUNO_PAY_ADMIN_PASSWORD")
+	}
+
+	dataDir := getenv("JUNO_PAY_DATA_DIR", defaultDataDir())
+	tokenKeyHex := getenv("JUNO_PAY_TOKEN_KEY_HEX", "")
+	if tokenKeyHex == "" {
+		log.Fatalf("missing env: JUNO_PAY_TOKEN_KEY_HEX")
+	}
+	tokenKey, err := hex.DecodeString(tokenKeyHex)
+	if err != nil || len(tokenKey) != 32 {
+		log.Fatalf("invalid JUNO_PAY_TOKEN_KEY_HEX (expected 32-byte hex)")
+	}
+
+	storeDriver := strings.ToLower(strings.TrimSpace(getenv("JUNO_PAY_STORE_DRIVER", "sqlite")))
+	storePrefix := strings.TrimSpace(getenv("JUNO_PAY_STORE_PREFIX", ""))
+	storeDSN := strings.TrimSpace(getenv("JUNO_PAY_STORE_DSN", ""))
+	storeDB := strings.TrimSpace(getenv("JUNO_PAY_STORE_DB", ""))
+
+	var st store.Store
+	var stInit func(context.Context) error
+	var stClose func() error
+
+	openCtx, openCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer openCancel()
+
+	switch storeDriver {
+	case "sqlite":
+		opts := []sqlstore.Option{}
+		if storePrefix != "" {
+			opts = append(opts, sqlstore.WithTablePrefix(storePrefix))
+		}
+		sqlSt, err := sqlstore.OpenSQLite(dataDir, tokenKey, opts...)
+		if err != nil {
+			log.Fatalf("open sqlite store: %v", err)
+		}
+		st = sqlSt
+		stInit = sqlSt.Init
+		stClose = sqlSt.Close
+	case "postgres":
+		if storeDSN == "" {
+			log.Fatalf("missing env: JUNO_PAY_STORE_DSN")
+		}
+		opts := []sqlstore.Option{}
+		if storePrefix != "" {
+			opts = append(opts, sqlstore.WithTablePrefix(storePrefix))
+		}
+		sqlSt, err := sqlstore.OpenPostgres(storeDSN, tokenKey, opts...)
+		if err != nil {
+			log.Fatalf("open postgres store: %v", err)
+		}
+		st = sqlSt
+		stInit = sqlSt.Init
+		stClose = sqlSt.Close
+	case "mysql":
+		if storeDSN == "" {
+			log.Fatalf("missing env: JUNO_PAY_STORE_DSN")
+		}
+		opts := []sqlstore.Option{}
+		if storePrefix != "" {
+			opts = append(opts, sqlstore.WithTablePrefix(storePrefix))
+		}
+		sqlSt, err := sqlstore.OpenMySQL(storeDSN, tokenKey, opts...)
+		if err != nil {
+			log.Fatalf("open mysql store: %v", err)
+		}
+		st = sqlSt
+		stInit = sqlSt.Init
+		stClose = sqlSt.Close
+	case "mongo", "mongodb":
+		if storeDSN == "" {
+			log.Fatalf("missing env: JUNO_PAY_STORE_DSN")
+		}
+		if storeDB == "" {
+			log.Fatalf("missing env: JUNO_PAY_STORE_DB")
+		}
+		opts := []mongostore.Option{}
+		if storePrefix != "" {
+			opts = append(opts, mongostore.WithCollectionPrefix(storePrefix))
+		}
+		mgSt, err := mongostore.Open(openCtx, mongostore.OpenConfig{
+			URI:      storeDSN,
+			Database: storeDB,
+			TokenKey: tokenKey,
+			Options:  opts,
+		})
+		if err != nil {
+			log.Fatalf("open mongo store: %v", err)
+		}
+		st = mgSt
+		stInit = mgSt.Init
+		stClose = mgSt.Close
+	default:
+		log.Fatalf("invalid JUNO_PAY_STORE_DRIVER: %q", storeDriver)
+	}
+	defer func() {
+		if stClose != nil {
+			_ = stClose()
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if stInit != nil {
+		if err := stInit(ctx); err != nil {
+			log.Fatalf("init store: %v", err)
+		}
+	}
+
+	rpcURL := getenv("JUNO_CASHD_RPC_URL", "http://127.0.0.1:8232")
+	rpcUser := getenv("JUNO_CASHD_RPC_USER", "")
+	rpcPass := getenv("JUNO_CASHD_RPC_PASS", "")
+	jcd := junocashd.New(rpcURL, rpcUser, rpcPass)
+
+	scanURL := getenv("JUNO_SCAN_URL", "")
+	if scanURL == "" {
+		log.Fatalf("missing env: JUNO_SCAN_URL")
+	}
+	sc, err := scanclient.New(scanURL)
+	if err != nil {
+		log.Fatalf("init scan client: %v", err)
+	}
+
+	s, err := api.New(
+		st,
+		keysDeriver{d: ffi.New()},
+		junocashdTip{cli: jcd},
+		realClock{},
+		randTokenGen{},
+		api.WithAdminPassword(adminPassword),
+		api.WithAdminUI(defaultAdminUIDir()),
+		api.WithScannerHealth(sc),
+	)
+	if err != nil {
+		log.Fatalf("init error: %v", err)
+	}
+	pollInterval := parsePollInterval(getenv("JUNO_PAY_SCAN_POLL_MS", "1000"))
+	ing, err := ingest.New(st, sc, pollInterval)
+	if err != nil {
+		log.Fatalf("init ingestor: %v", err)
+	}
+	go func() {
+		for {
+			if err := ing.Sync(context.Background()); err != nil {
+				log.Printf("scan sync error: %v", err)
+			}
+			func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+
+				bestHeight, err := jcd.GetBlockCount(ctx)
+				if err != nil {
+					log.Printf("getblockcount error: %v", err)
+					return
+				}
+				if err := st.UpdateInvoiceConfirmations(ctx, bestHeight); err != nil {
+					log.Printf("update invoice confirmations error: %v", err)
+					return
+				}
+			}()
+			time.Sleep(pollInterval)
+		}
+	}()
+
+	outboxPoll := parsePollInterval(getenv("JUNO_PAY_OUTBOX_POLL_MS", "500"))
+	outboxBatchSize := parseIntClamp(getenv("JUNO_PAY_OUTBOX_BATCH_SIZE", "100"), 1, 1000)
+	outboxMaxAttempts := int32(parseIntClamp(getenv("JUNO_PAY_OUTBOX_MAX_ATTEMPTS", "25"), 1, 1000))
+	ob, err := outbox.New(st, outbox.WithBatchSize(outboxBatchSize), outbox.WithMaxAttempts(outboxMaxAttempts))
+	if err != nil {
+		log.Fatalf("init outbox: %v", err)
+	}
+	go func() {
+		for {
+			if err := ob.Sync(context.Background()); err != nil {
+				log.Printf("outbox sync error: %v", err)
+			}
+			time.Sleep(outboxPoll)
+		}
+	}()
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	log.Printf("listening on %s", addr)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("server error: %v", err)
+	}
+}
+
+func getenv(key, fallback string) string {
+	if v, ok := os.LookupEnv(key); ok {
+		return v
+	}
+	return fallback
+}
+
+func defaultDataDir() string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".juno-pay-server")
+	}
+	return ".juno-pay-server"
+}
+
+func defaultAdminUIDir() string {
+	if v, ok := os.LookupEnv("JUNO_PAY_ADMIN_UI_DIR"); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
+}
+
+func parsePollInterval(ms string) time.Duration {
+	n, err := strconv.Atoi(ms)
+	if err != nil || n <= 0 {
+		return time.Second
+	}
+	if n < 100 {
+		n = 100
+	}
+	if n > 60000 {
+		n = 60000
+	}
+	return time.Duration(n) * time.Millisecond
+}
+
+func parseIntClamp(v string, min, max int) int {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil {
+		return min
+	}
+	if n < min {
+		return min
+	}
+	if n > max {
+		return max
+	}
+	return n
+}
+
+type keysDeriver struct{ d keys.Deriver }
+
+func (kd keysDeriver) Derive(ufvk string, uaHRP string, index uint32) (string, error) {
+	return kd.d.AddressFromUFVK(ufvk, uaHRP, keys.ScopeExternal, index)
+}
+
+type junocashdTip struct{ cli *junocashd.Client }
+
+func (t junocashdTip) BestTip(ctx context.Context) (int64, string, error) {
+	if t.cli == nil {
+		return 0, "", nil
+	}
+	height, err := t.cli.GetBlockCount(ctx)
+	if err != nil {
+		return 0, "", err
+	}
+	hash, err := t.cli.GetBlockHash(ctx, height)
+	if err != nil {
+		return 0, "", err
+	}
+	return height, hash, nil
+}
+
+func (t junocashdTip) UptimeSeconds(ctx context.Context) (int64, error) {
+	if t.cli == nil {
+		return 0, nil
+	}
+	var out int64
+	if err := t.cli.Call(ctx, "uptime", nil, &out); err != nil {
+		var rpcErr *junocashd.RPCError
+		if errors.As(err, &rpcErr) && rpcErr.Code == -32601 {
+			return 0, api.ErrUptimeUnsupported
+		}
+		return 0, err
+	}
+	if out < 0 {
+		out = 0
+	}
+	return out, nil
+}
+
+type realClock struct{}
+
+func (realClock) Now() time.Time { return time.Now().UTC() }
+
+type randTokenGen struct{}
+
+func (randTokenGen) NewInvoiceToken() (string, error) {
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return "inv_tok_" + hex.EncodeToString(raw[:]), nil
+}

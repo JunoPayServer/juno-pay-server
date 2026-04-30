@@ -1,0 +1,44 @@
+aws_region  = "us-east-1"
+name_prefix = "juno-pay"
+
+# One-click networking (default):
+create_network      = true
+vpc_cidr            = "10.20.0.0/16"
+public_subnet_cidr  = "10.20.1.0/24"
+
+# If you want to deploy into an existing VPC/subnet:
+# create_network = false
+# vpc_id    = "vpc-xxxxxxxx"
+# subnet_id = "subnet-xxxxxxxx"
+
+allowed_cidrs = ["0.0.0.0/0"]
+
+admin_password_ssm_param = "/juno-pay/admin_password"
+token_key_ssm_param      = "/juno-pay/token_key_hex"
+
+# Demo app (optional).
+enable_demo_app                 = true
+demo_port                       = 80
+demo_allowed_cidrs              = ["0.0.0.0/0"]
+demo_merchant_api_key_ssm_param = "/juno-pay/demo_merchant_api_key"
+
+# Optional: external DB for juno-pay-server store.
+# pay_store_driver       = "postgres" # sqlite|postgres|mysql|mongo
+# pay_store_dsn_ssm_param = "/juno-pay/pay_store_dsn"
+# pay_store_prefix       = "pay"
+# pay_store_db           = "juno_pay" # mongo only
+
+image_juno_pay_server = "123456789012.dkr.ecr.us-east-1.amazonaws.com/juno-pay-juno-pay-server:TAG"
+image_junocashd       = "123456789012.dkr.ecr.us-east-1.amazonaws.com/juno-pay-junocashd:TAG"
+image_juno_scan       = "123456789012.dkr.ecr.us-east-1.amazonaws.com/juno-pay-juno-scan:TAG"
+image_demo_app        = "123456789012.dkr.ecr.us-east-1.amazonaws.com/juno-pay-juno-demo-app:TAG"
+
+juno_chain = "mainnet"
+
+# Optional: RDS Postgres for juno-scan.
+enable_rds_postgres = false
+rds_subnet_ids      = ["subnet-aaaaaaaa", "subnet-bbbbbbbb"]
+
+# Optional: MSK Kafka cluster for outbound events.
+enable_msk    = false
+msk_subnet_ids = ["subnet-aaaaaaaa", "subnet-bbbbbbbb"]

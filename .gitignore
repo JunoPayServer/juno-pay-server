@@ -1,0 +1,18 @@
+# Local-only
+/AGENTS.md
+/.env
+/.env.*
+!/.env.example
+/tmp/
+/tmp-*/
+/bin/
+/.cache/
+*.sqlite
+/internal/api/adminui_dist/
+
+# Rust
+/rust/**/target/
+
+# OS
+.DS_Store
+node_modules/

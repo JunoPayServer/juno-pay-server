@@ -1,0 +1,16 @@
+@import "tailwindcss";
+@import "@junopayserver/widgets/theme.css";
+
+/* ── Base ── */
+button { cursor: pointer; }
+
+body {
+  background: #0e0e12;
+  color: #f0f0f2;
+  font-family: Arial, Helvetica, sans-serif;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+[data-theme='light'] body {
+  background: #f0f0f0;
+  color: #111111;
+}

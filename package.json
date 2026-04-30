@@ -1,0 +1,11 @@
+{
+  "private": true,
+  "workspaces": ["packages/*", "demo-app", "admin-dashboard"],
+  "devDependencies": {
+    "@types/react": "^19",
+    "react": "19.2.3"
+  },
+  "overrides": {
+    "postcss": "^8.5.12"
+  }
+}

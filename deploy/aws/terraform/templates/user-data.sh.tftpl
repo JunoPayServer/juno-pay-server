@@ -1,0 +1,411 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+NAME_PREFIX="${name_prefix}"
+REGION="${aws_region}"
+ROOT="/opt/${name_prefix}"
+DATA_DIR="$ROOT/data"
+DATA_VOLUME_ID="${data_volume_id}"
+RDS_SECRET_ARN="${rds_secret_arn}"
+PAY_STORE_DSN_PARAM="${pay_store_dsn_ssm_param}"
+DEMO_MERCHANT_API_KEY_PARAM="${demo_merchant_api_key_ssm_param}"
+ENABLE_DEMO_APP="${enable_demo_app}"
+ENABLE_CADDY="${enable_caddy}"
+PAY_SERVER_PORT="${pay_server_port}"
+
+mkdir -p "$ROOT"
+cd "$ROOT"
+
+dnf update -y
+dnf install -y docker awscli python3 e2fsprogs
+systemctl enable docker
+systemctl start docker
+
+if ! docker compose version >/dev/null 2>&1; then
+  COMPOSE_VERSION="v2.27.0"
+  DEST="/usr/local/lib/docker/cli-plugins"
+  mkdir -p "$DEST"
+  curl -fsSLo "$DEST/docker-compose" \
+    "https://github.com/docker/compose/releases/download/$${COMPOSE_VERSION}/docker-compose-linux-x86_64"
+  chmod +x "$DEST/docker-compose"
+  docker compose version
+fi
+
+ACCOUNT_ID="$(aws sts get-caller-identity --region "$REGION" --query Account --output text)"
+ECR_REGISTRY="$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com"
+for i in {1..10}; do
+  if aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"; then
+    break
+  fi
+  if [[ "$i" == "10" ]]; then
+    echo "ECR login failed after retries" >&2
+    exit 1
+  fi
+  echo "ECR login failed (attempt $i/10); retrying..." >&2
+  sleep $((i * 2))
+done
+
+mkdir -p "$DATA_DIR"
+if [[ -n "$DATA_VOLUME_ID" ]]; then
+  VOL_ID_NOPREFIX="$(printf '%s' "$DATA_VOLUME_ID" | sed 's/^vol-//')"
+  DEV_BY_ID_1="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_$DATA_VOLUME_ID"
+  DEV_BY_ID_2="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol$VOL_ID_NOPREFIX"
+  DEV=""
+  for _ in {1..90}; do
+    if [[ -b "$DEV_BY_ID_1" ]]; then
+      DEV="$DEV_BY_ID_1"
+      break
+    fi
+    if [[ -b "$DEV_BY_ID_2" ]]; then
+      DEV="$DEV_BY_ID_2"
+      break
+    fi
+    if [[ -b "/dev/xvdf" ]]; then
+      DEV="/dev/xvdf"
+      break
+    fi
+    sleep 2
+  done
+  if [[ -z "$DEV" ]]; then
+    echo "data volume device not found for $DATA_VOLUME_ID" >&2
+    ls -l /dev/disk/by-id || true
+    ls -l /dev | head || true
+    exit 1
+  fi
+  if ! blkid "$DEV" >/dev/null 2>&1; then
+    mkfs.ext4 -F "$DEV"
+  fi
+  UUID="$(blkid -o value -s UUID "$DEV")"
+  if ! grep -q "UUID=$UUID" /etc/fstab; then
+    echo "UUID=$UUID $DATA_DIR ext4 defaults,nofail 0 2" >> /etc/fstab
+  fi
+  mount "$DATA_DIR"
+fi
+
+mkdir -p "$DATA_DIR/junocashd" "$DATA_DIR/juno-scan" "$DATA_DIR/juno-pay-server"
+%{ if enable_caddy ~}
+mkdir -p "$DATA_DIR/caddy/data" "$DATA_DIR/caddy/config"
+%{ endif ~}
+chown -R 10001:65534 "$DATA_DIR/juno-pay-server" || true
+
+ADMIN_PASSWORD="$(aws ssm get-parameter --with-decryption --region "$REGION" --name "${admin_password_ssm_param}" --query 'Parameter.Value' --output text)"
+TOKEN_KEY_HEX="$(aws ssm get-parameter --with-decryption --region "$REGION" --name "${token_key_ssm_param}" --query 'Parameter.Value' --output text)"
+PAY_STORE_DSN=""
+if [[ -n "$PAY_STORE_DSN_PARAM" ]]; then
+  PAY_STORE_DSN="$(aws ssm get-parameter --with-decryption --region "$REGION" --name "$PAY_STORE_DSN_PARAM" --query 'Parameter.Value' --output text)"
+fi
+DEMO_MERCHANT_API_KEY=""
+if [[ -n "$DEMO_MERCHANT_API_KEY_PARAM" ]]; then
+  set +e
+  DEMO_MERCHANT_API_KEY="$(aws ssm get-parameter --with-decryption --region "$REGION" --name "$DEMO_MERCHANT_API_KEY_PARAM" --query 'Parameter.Value' --output text 2>/dev/null)"
+  rc=$?
+  set -e
+  if [[ "$rc" != "0" ]]; then
+    DEMO_MERCHANT_API_KEY=""
+  fi
+fi
+export ADMIN_PASSWORD TOKEN_KEY_HEX PAY_STORE_DSN DEMO_MERCHANT_API_KEY REGION RDS_SECRET_ARN
+
+cat > docker-compose.yml <<'EOF'
+${docker_compose_yml}
+EOF
+
+%{ if enable_caddy ~}
+cat > Caddyfile <<'EOF'
+${domain_name}, www.${domain_name} {
+  encode zstd gzip
+
+  @backend path /admin* /v1/*
+  handle @backend {
+    reverse_proxy juno-pay-server:8080
+  }
+
+%{ if enable_demo_app ~}
+  handle {
+    reverse_proxy demo-app:3000
+  }
+%{ else ~}
+  handle {
+    respond "not found" 404
+  }
+%{ endif ~}
+}
+EOF
+%{ endif ~}
+
+python3 - <<'PY'
+import json
+import os
+import subprocess
+
+compose_path = "docker-compose.yml"
+
+admin_pw = os.environ["ADMIN_PASSWORD"]
+token_key = os.environ["TOKEN_KEY_HEX"]
+pay_store_dsn = os.environ.get("PAY_STORE_DSN", "").strip()
+demo_api_key = os.environ.get("DEMO_MERCHANT_API_KEY", "").strip()
+region = os.environ["REGION"]
+rds_secret_arn = os.environ.get("RDS_SECRET_ARN", "").strip()
+
+with open(compose_path, "r", encoding="utf-8") as f:
+  s = f.read()
+
+s = s.replace("__ADMIN_PASSWORD__", json.dumps(admin_pw))
+s = s.replace("__TOKEN_KEY_HEX__", json.dumps(token_key))
+
+if "__PAY_STORE_DSN__" in s:
+  if not pay_store_dsn:
+    raise SystemExit("pay store DSN placeholder present but PAY_STORE_DSN is empty")
+  s = s.replace("__PAY_STORE_DSN__", json.dumps(pay_store_dsn))
+
+if "__DEMO_MERCHANT_API_KEY__" in s:
+  s = s.replace("__DEMO_MERCHANT_API_KEY__", json.dumps(demo_api_key))
+
+if "__RDS_PASSWORD__" in s:
+  if not rds_secret_arn:
+    raise SystemExit("RDS enabled but RDS_SECRET_ARN is empty")
+  secret_str = subprocess.check_output(
+    [
+      "aws",
+      "secretsmanager",
+      "get-secret-value",
+      "--region",
+      region,
+      "--secret-id",
+      rds_secret_arn,
+      "--query",
+      "SecretString",
+      "--output",
+      "text",
+    ],
+    text=True,
+  ).strip()
+  secret = json.loads(secret_str)
+  password = secret.get("password")
+  if not password:
+    raise SystemExit("RDS secret missing password field")
+  s = s.replace("__RDS_PASSWORD__", password)
+
+with open(compose_path, "w", encoding="utf-8") as f:
+  f.write(s)
+PY
+
+for i in {1..10}; do
+  if docker compose up -d; then
+    break
+  fi
+  if [[ "$i" == "10" ]]; then
+    echo "docker compose up failed after retries" >&2
+    docker compose ps || true
+    exit 1
+  fi
+  echo "docker compose up failed (attempt $i/10); retrying..." >&2
+  sleep $((i * 2))
+done
+
+if [[ "$ENABLE_DEMO_APP" == "true" && -n "$DEMO_MERCHANT_API_KEY_PARAM" && -z "$DEMO_MERCHANT_API_KEY" ]]; then
+  echo "bootstrapping demo merchant api key"
+
+  for i in {1..60}; do
+    if curl -fsS "http://127.0.0.1:$PAY_SERVER_PORT/v1/health" >/dev/null; then
+      break
+    fi
+    if [[ "$i" == "60" ]]; then
+      echo "demo api key bootstrap: backend health check timed out" >&2
+      break
+    fi
+    sleep 2
+  done
+
+  COOKIE="$(mktemp)"
+  LOGIN_BODY="$(python3 - <<'PY'
+import json
+import os
+
+print(json.dumps({"password": os.environ["ADMIN_PASSWORD"]}))
+PY
+)"
+  curl -fsS -c "$COOKIE" -H "Content-Type: application/json" -d "$LOGIN_BODY" "http://127.0.0.1:$PAY_SERVER_PORT/admin/login" >/dev/null || true
+
+  MERCHANTS="$(curl -fsS -b "$COOKIE" "http://127.0.0.1:$PAY_SERVER_PORT/v1/admin/merchants" || true)"
+  MERCHANT_ID="$(python3 - <<'PY'
+import json
+import sys
+
+try:
+  body = json.load(sys.stdin)
+except Exception:
+  sys.exit(0)
+
+for m in body.get("data") or []:
+  if (m.get("name") or "").strip().lower() == "demo":
+    mid = (m.get("merchant_id") or "").strip()
+    if mid:
+      print(mid)
+      break
+PY
+<<<"$MERCHANTS"
+)"
+
+  if [[ -z "$MERCHANT_ID" ]]; then
+    CREATE_BODY='{"name":"demo"}'
+    CREATE_RES="$(curl -fsS -b "$COOKIE" -H "Content-Type: application/json" -d "$CREATE_BODY" "http://127.0.0.1:$PAY_SERVER_PORT/v1/admin/merchants" || true)"
+    MERCHANT_ID="$(python3 - <<'PY'
+import json
+import sys
+
+try:
+  body = json.load(sys.stdin)
+except Exception:
+  sys.exit(0)
+
+print((body.get("data") or {}).get("merchant_id") or "")
+PY
+<<<"$CREATE_RES"
+)"
+  fi
+
+  if [[ -n "$MERCHANT_ID" ]]; then
+    KEY_BODY='{"label":"demo"}'
+    KEY_RES="$(curl -fsS -b "$COOKIE" -H "Content-Type: application/json" -d "$KEY_BODY" "http://127.0.0.1:$PAY_SERVER_PORT/v1/admin/merchants/$MERCHANT_ID/api-keys" || true)"
+    DEMO_MERCHANT_API_KEY="$(python3 - <<'PY'
+import json
+import sys
+
+try:
+  body = json.load(sys.stdin)
+except Exception:
+  sys.exit(0)
+
+print((body.get("data") or {}).get("api_key") or "")
+PY
+<<<"$KEY_RES"
+)"
+  fi
+
+  rm -f "$COOKIE" || true
+
+  if [[ -n "$DEMO_MERCHANT_API_KEY" ]]; then
+    aws ssm put-parameter --region "$REGION" --name "$DEMO_MERCHANT_API_KEY_PARAM" --type SecureString --overwrite --value "$DEMO_MERCHANT_API_KEY" >/dev/null || true
+    export DEMO_MERCHANT_API_KEY
+
+    cat > docker-compose.yml <<'EOF'
+${docker_compose_yml}
+EOF
+
+    python3 - <<'PY'
+import json
+import os
+import subprocess
+
+compose_path = "docker-compose.yml"
+
+admin_pw = os.environ["ADMIN_PASSWORD"]
+token_key = os.environ["TOKEN_KEY_HEX"]
+pay_store_dsn = os.environ.get("PAY_STORE_DSN", "").strip()
+demo_api_key = os.environ.get("DEMO_MERCHANT_API_KEY", "").strip()
+region = os.environ["REGION"]
+rds_secret_arn = os.environ.get("RDS_SECRET_ARN", "").strip()
+
+with open(compose_path, "r", encoding="utf-8") as f:
+  s = f.read()
+
+s = s.replace("__ADMIN_PASSWORD__", json.dumps(admin_pw))
+s = s.replace("__TOKEN_KEY_HEX__", json.dumps(token_key))
+
+if "__PAY_STORE_DSN__" in s:
+  if not pay_store_dsn:
+    raise SystemExit("pay store DSN placeholder present but PAY_STORE_DSN is empty")
+  s = s.replace("__PAY_STORE_DSN__", json.dumps(pay_store_dsn))
+
+if "__DEMO_MERCHANT_API_KEY__" in s:
+  s = s.replace("__DEMO_MERCHANT_API_KEY__", json.dumps(demo_api_key))
+
+if "__RDS_PASSWORD__" in s:
+  if not rds_secret_arn:
+    raise SystemExit("RDS enabled but RDS_SECRET_ARN is empty")
+  secret_str = subprocess.check_output(
+    [
+      "aws",
+      "secretsmanager",
+      "get-secret-value",
+      "--region",
+      region,
+      "--secret-id",
+      rds_secret_arn,
+      "--query",
+      "SecretString",
+      "--output",
+      "text",
+    ],
+    text=True,
+  ).strip()
+  secret = json.loads(secret_str)
+  password = secret.get("password")
+  if not password:
+    raise SystemExit("RDS secret missing password field")
+  s = s.replace("__RDS_PASSWORD__", password)
+
+with open(compose_path, "w", encoding="utf-8") as f:
+  f.write(s)
+PY
+
+    docker compose up -d --no-deps --force-recreate demo-app >/dev/null || true
+  fi
+fi
+
+UPDATE_SCRIPT="/usr/local/bin/$NAME_PREFIX-update-app.sh"
+cat > "$UPDATE_SCRIPT" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+exec 9>"/var/lock/$NAME_PREFIX-update-app.lock"
+flock -n 9 || exit 0
+
+REGION="$REGION"
+ROOT="$ROOT"
+
+ACCOUNT_ID="\$(aws sts get-caller-identity --region "\$REGION" --query Account --output text)"
+REGISTRY="\$ACCOUNT_ID.dkr.ecr.\$REGION.amazonaws.com"
+aws ecr get-login-password --region "\$REGION" | docker login --username AWS --password-stdin "\$REGISTRY" >/dev/null
+
+cd "\$ROOT"
+
+SERVICES=(juno-pay-server)
+if docker compose config --services | grep -qx demo-app; then
+  SERVICES+=(demo-app)
+fi
+
+docker compose pull "\$${SERVICES[@]}"
+docker compose up -d --no-deps "\$${SERVICES[@]}"
+EOF
+chmod +x "$UPDATE_SCRIPT"
+
+cat > "/etc/systemd/system/$NAME_PREFIX-update-app.service" <<EOF
+[Unit]
+Description=Update $NAME_PREFIX app containers
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=$UPDATE_SCRIPT
+EOF
+
+cat > "/etc/systemd/system/$NAME_PREFIX-update-app.timer" <<EOF
+[Unit]
+Description=Periodic update for $NAME_PREFIX app containers
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now "$NAME_PREFIX-update-app.timer"
+
+echo "juno-pay-server started"
